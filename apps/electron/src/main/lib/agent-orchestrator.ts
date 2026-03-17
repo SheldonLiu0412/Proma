@@ -17,7 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { app } from 'electron'
@@ -973,22 +973,28 @@ export class AgentOrchestrator {
       }
 
       // Debug：将完整 prompt 写入 ~/.proma/debug/（需设置 PROMA_AGENT_DEBUG=1）
+      // 同一会话的多次对话追加到同一个 JSON 文件中，文件名按 sessionId 固定
       if (process.env.PROMA_AGENT_DEBUG) {
         const debugDir = join(homedir(), '.proma', 'debug')
         if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true })
-        const ts = new Date().toISOString().replace(/[:.]/g, '-')
-        const debugPayload = {
+        const debugFilePath = join(debugDir, `agent-${sessionId}.json`)
+        const debugEntry = {
           timestamp: new Date().toISOString(),
-          sessionId,
           model: queryOptions.model,
           systemPrompt: queryOptions.systemPrompt,
           finalPrompt: queryOptions.prompt,
           mcpServers: Object.keys(mcpServers),
           resumeSessionId: existingSdkSessionId || null,
         }
-        // 打包后运行在 Node.js 环境，使用 writeFileSync
         try {
-          writeFileSync(join(debugDir, `agent-${ts}.json`), JSON.stringify(debugPayload, null, 2))
+          // 读取已有记录（若存在），追加本次记录
+          let entries: object[] = []
+          if (existsSync(debugFilePath)) {
+            const existing = JSON.parse(readFileSync(debugFilePath, 'utf-8') || '[]')
+            entries = Array.isArray(existing) ? existing : [existing]
+          }
+          entries.push(debugEntry)
+          writeFileSync(debugFilePath, JSON.stringify(entries, null, 2))
         } catch { /* 静默忽略写入失败 */ }
       }
 
