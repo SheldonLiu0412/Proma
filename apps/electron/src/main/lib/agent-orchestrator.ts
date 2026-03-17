@@ -17,7 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { app } from 'electron'
@@ -970,6 +970,26 @@ export class AgentOrchestrator {
         onContextWindow: (cw: number) => {
           console.log(`[Agent 编排] 缓存 contextWindow: ${cw}`)
         },
+      }
+
+      // Debug：将完整 prompt 写入 ~/.proma/debug/（需设置 PROMA_AGENT_DEBUG=1）
+      if (process.env.PROMA_AGENT_DEBUG) {
+        const debugDir = join(homedir(), '.proma', 'debug')
+        if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true })
+        const ts = new Date().toISOString().replace(/[:.]/g, '-')
+        const debugPayload = {
+          timestamp: new Date().toISOString(),
+          sessionId,
+          model: queryOptions.model,
+          systemPrompt: queryOptions.systemPrompt,
+          finalPrompt: queryOptions.prompt,
+          mcpServers: Object.keys(mcpServers),
+          resumeSessionId: existingSdkSessionId || null,
+        }
+        // 打包后运行在 Node.js 环境，使用 writeFileSync
+        try {
+          writeFileSync(join(debugDir, `agent-${ts}.json`), JSON.stringify(debugPayload, null, 2))
+        } catch { /* 静默忽略写入失败 */ }
       }
 
       console.log(`[Agent 编排] 开始通过 Adapter 遍历事件流...`)
