@@ -38,6 +38,8 @@ import { getWorkspaceAttachedDirectories } from './agent-workspace-manager'
 import { getRuntimeStatus } from './runtime-init'
 import { getSettings } from './settings-service'
 import { buildSystemPromptAppend, buildDynamicContext } from './agent-prompt-builder'
+import { createApiInterceptor } from './api-interceptor'
+import type { ApiInterceptorHandle } from './api-interceptor'
 import { permissionService } from './agent-permission-service'
 import { askUserService } from './agent-ask-user-service'
 import { getMemoryConfig } from './memory-service'
@@ -724,6 +726,38 @@ export class AgentOrchestrator {
 
     const sdkEnv = await this.buildSdkEnv(apiKey, channel.baseUrl)
 
+    // debug 模式：启动 API 拦截器，记录 SDK 子进程的每一次 Anthropic API 调用
+    let apiInterceptor: ApiInterceptorHandle | null = null
+    if (process.env.PROMA_AGENT_DEBUG) {
+      const realBaseUrl = (channel.baseUrl && channel.baseUrl !== 'https://api.anthropic.com')
+        ? normalizeAnthropicBaseUrlForSdk(channel.baseUrl)
+        : 'https://api.anthropic.com'
+      try {
+        apiInterceptor = await createApiInterceptor(
+          (entry) => {
+            const debugDir = join(homedir(), '.proma', 'debug')
+            if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true })
+            const debugFilePath = join(debugDir, `agent-${sessionId}.json`)
+            try {
+              const existing = existsSync(debugFilePath)
+                ? JSON.parse(readFileSync(debugFilePath, 'utf-8') || '[]')
+                : []
+              const entries = Array.isArray(existing) ? existing : [existing]
+              entries.push(entry)
+              writeFileSync(debugFilePath, JSON.stringify(entries, null, 2))
+            } catch { /* 静默忽略 */ }
+          },
+          realBaseUrl,
+        )
+        // 覆盖 SDK 子进程的 ANTHROPIC_BASE_URL，流量经过本地拦截器
+        sdkEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${apiInterceptor.port}`
+        console.log(`[Agent 编排] API 拦截器已启动，端口: ${apiInterceptor.port}，转发至: ${realBaseUrl}`)
+      } catch (err) {
+        console.warn('[Agent 编排] API 拦截器启动失败，跳过抓包:', err)
+        apiInterceptor = null
+      }
+    }
+
     // 4. 读取已有的 SDK session ID（用于 resume）
     const sessionMeta = getAgentSessionMeta(sessionId)
     let existingSdkSessionId = sessionMeta?.sdkSessionId
@@ -974,11 +1008,15 @@ export class AgentOrchestrator {
 
       // Debug：将完整 prompt 写入 ~/.proma/debug/（需设置 PROMA_AGENT_DEBUG=1）
       // 同一会话的多次对话追加到同一个 JSON 文件中，文件名按 sessionId 固定
-      if (process.env.PROMA_AGENT_DEBUG) {
+      const debugFilePath = process.env.PROMA_AGENT_DEBUG
+        ? join(homedir(), '.proma', 'debug', `agent-${sessionId}.json`)
+        : null
+
+      if (debugFilePath) {
         const debugDir = join(homedir(), '.proma', 'debug')
         if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true })
-        const debugFilePath = join(debugDir, `agent-${sessionId}.json`)
         const debugEntry = {
+          type: 'query',
           timestamp: new Date().toISOString(),
           model: queryOptions.model,
           systemPrompt: queryOptions.systemPrompt,
@@ -987,7 +1025,6 @@ export class AgentOrchestrator {
           resumeSessionId: existingSdkSessionId || null,
         }
         try {
-          // 读取已有记录（若存在），追加本次记录
           let entries: object[] = []
           if (existsSync(debugFilePath)) {
             const existing = JSON.parse(readFileSync(debugFilePath, 'utf-8') || '[]')
@@ -1239,6 +1276,44 @@ export class AgentOrchestrator {
           // 15. 持久化 assistant 消息
           this.persistAssistantMessage(sessionId, accumulatedText, accumulatedEvents, resolvedModel)
 
+          // Debug：记录工具调用详情到 debug JSON
+          if (debugFilePath) {
+            try {
+              // 提取并配对 tool_start / tool_result
+              const toolStarts = accumulatedEvents.filter((e) => e.type === 'tool_start') as Array<{
+                type: 'tool_start'; toolName: string; toolUseId: string; input: Record<string, unknown>; intent?: string; displayName?: string
+              }>
+              const toolResults = accumulatedEvents.filter((e) => e.type === 'tool_result') as Array<{
+                type: 'tool_result'; toolUseId: string; toolName?: string; result: string; isError: boolean; input?: Record<string, unknown>
+              }>
+              const toolResultMap = new Map(toolResults.map((r) => [r.toolUseId, r]))
+
+              const toolCalls = toolStarts.map((s) => {
+                const result = toolResultMap.get(s.toolUseId)
+                return {
+                  tool: s.displayName || s.toolName,
+                  input: s.input,
+                  intent: s.intent,
+                  isError: result?.isError ?? false,
+                  result: result?.result ?? null,
+                }
+              })
+
+              const resultEntry = {
+                type: 'result',
+                timestamp: new Date().toISOString(),
+                attempt,
+                responseText: accumulatedText,
+                toolCalls,
+              }
+
+              const existing = JSON.parse(readFileSync(debugFilePath, 'utf-8') || '[]')
+              const entries = Array.isArray(existing) ? existing : [existing]
+              entries.push(resultEntry)
+              writeFileSync(debugFilePath, JSON.stringify(entries, null, 2))
+            } catch { /* 静默忽略 */ }
+          }
+
           // 16. Agent Teams Auto-Resume：teammates 完成后自动收集结果并汇总
           //     触发条件：有 teammate 启动过（正常完成或 Watchdog 中断均适用）
           console.log(`[Agent 编排] Auto-resume 条件检查: startedTasks=${startedTaskIds.size}, sdkSession=${!!capturedSdkSessionId}, active=${this.activeSessions.has(sessionId)}`)
@@ -1478,6 +1553,8 @@ export class AgentOrchestrator {
       this.activeSessions.delete(sessionId)
       permissionService.clearSessionPending(sessionId)
       askUserService.clearSessionPending(sessionId)
+      // 关闭 API 拦截器（释放端口）
+      apiInterceptor?.close()
     }
   }
 
