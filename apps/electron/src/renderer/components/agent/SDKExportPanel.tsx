@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Check, ChevronDown } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Check, ChevronDown, ChevronUp } from 'lucide-react'
 import { useAtomValue } from 'jotai'
 import type { SDKMessage, SDKUserMessage, SDKAssistantMessage } from '@proma/shared'
 import {
@@ -132,6 +132,28 @@ export function SDKExportPanel({ messages, sessionTitle, sessionModelId, trigger
   const selectAll = () => setSelectedIds(new Set(items.map((it) => it.id)))
   const clearAll = () => setSelectedIds(new Set())
 
+  const panelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = panelRef.current
+    if (!el) return
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      // 找到弹窗内可滚动的容器并手动滚动
+      const scrollable = el.querySelector('.overflow-y-auto') as HTMLElement | null
+      if (scrollable) scrollable.scrollTop += e.deltaY
+    }
+    el.addEventListener('wheel', handleWheel, { passive: false })
+    const handleMouseDown = (e: MouseEvent) => {
+      if (!el.contains(e.target as Node)) onClose()
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => {
+      el.removeEventListener('wheel', handleWheel)
+      document.removeEventListener('mousedown', handleMouseDown)
+    }
+  }, [onClose])
+
   // 获取选中项对应的 SDKMessage（去重，保持原始顺序）
   const getSelectedMessages = (): SDKMessage[] => {
     const seen = new Set<SDKMessage>()
@@ -161,9 +183,8 @@ export function SDKExportPanel({ messages, sessionTitle, sessionModelId, trigger
 
   return (
     <>
-      {/* 点击面板外关闭 */}
-      <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
+        ref={panelRef}
         className="absolute z-50 w-[280px] rounded-lg border bg-popover shadow-xl flex flex-col overflow-hidden animate-in fade-in-0 zoom-in-95 duration-150 origin-top-left"
         style={{ maxHeight: 'min(520px, 75vh)', left: '100%', bottom: 0, marginLeft: 8 }}
       >
@@ -174,7 +195,7 @@ export function SDKExportPanel({ messages, sessionTitle, sessionModelId, trigger
         </div>
 
         {/* 对话项列表（User / Assistant 独立选中，带头像） */}
-        <div className="overflow-y-auto flex-1 p-1.5 space-y-0.5 scrollbar-thin">
+        <div className="overflow-y-auto p-1.5 space-y-0.5 scrollbar-thin" style={{ maxHeight: '264px' }}>
           {items.length === 0 && (
             <p className="text-xs text-muted-foreground text-center py-4">暂无可导出内容</p>
           )}
@@ -220,15 +241,15 @@ export function SDKExportPanel({ messages, sessionTitle, sessionModelId, trigger
           })}
         </div>
 
-        {/* 合并导出按钮 */}
-        <div className="px-3 pt-2 pb-2.5 border-t flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <button onClick={selectAll} className="text-xs text-muted-foreground hover:text-foreground transition-colors">全选</button>
-            <span className="text-muted-foreground text-xs">·</span>
-            <button onClick={clearAll} className="text-xs text-muted-foreground hover:text-foreground transition-colors">取消全选</button>
-          </div>
-          <ExportMenu disabled={selectedIds.size === 0} onExport={handleExport} />
+        {/* 全选/取消全选 */}
+        <div className="px-3 py-1.5 flex items-center gap-2">
+          <button onClick={selectAll} className="text-xs text-muted-foreground hover:text-foreground transition-colors">全选</button>
+          <span className="text-muted-foreground text-xs">·</span>
+          <button onClick={clearAll} className="text-xs text-muted-foreground hover:text-foreground transition-colors">取消全选</button>
         </div>
+
+        {/* 导出 */}
+        <ExportMenu disabled={selectedIds.size === 0} onExport={handleExport} />
       </div>
     </>
   )
@@ -244,24 +265,16 @@ function ExportMenu({
   const [open, setOpen] = useState(false)
 
   const items: { icon: string; label: string; mode: ExportMode }[] = [
-    { icon: '📝', label: 'Markdown · 只含回复', mode: 'final-only' },
-    { icon: '📝', label: 'Markdown · 含工具流程', mode: 'with-flow' },
+    { icon: '📝', label: 'Markdown · 不包含工具调用', mode: 'final-only' },
+    { icon: '📝', label: 'Markdown · 完整', mode: 'with-flow' },
   ]
 
   return (
-    <div className="relative">
-      <button
-        onClick={() => !disabled && setOpen((v) => !v)}
-        disabled={disabled}
-        className="flex items-center justify-center gap-1.5 w-full rounded-md border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
-      >
-        导出
-        <ChevronDown className="size-3 opacity-60" />
-      </button>
+    <div className="relative border-t">
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full mb-1 left-0 right-0 rounded-md border bg-popover shadow-lg z-20 overflow-hidden">
+          <div className="absolute bottom-full left-0 right-0 z-20 border-x border-t border-b bg-popover overflow-hidden">
             {items.map((item) => (
               <button
                 key={item.mode}
@@ -275,6 +288,14 @@ function ExportMenu({
           </div>
         </>
       )}
+      <button
+        onClick={() => (open || !disabled) && setOpen((v) => !v)}
+        disabled={!open && disabled}
+        className={`flex items-center justify-center gap-1.5 w-full px-3 py-2 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed ${open ? 'bg-accent/50' : ''}`}
+      >
+        导出
+        {open ? <ChevronDown className="size-3 opacity-60" /> : <ChevronUp className="size-3 opacity-60" />}
+      </button>
     </div>
   )
 }

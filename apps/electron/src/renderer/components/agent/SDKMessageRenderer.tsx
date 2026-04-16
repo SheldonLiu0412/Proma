@@ -559,7 +559,7 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
           <MessageActions className="pl-[46px] mt-0.5 min-h-[28px] justify-start">
             {hasDuration && <DurationBadge durationMs={durationMs!} usage={usage} />}
             {textContent && <CopyButton content={textContent} />}
-            {textContent && (
+            {turn.turnMessages.length > 0 && (
               <div className="relative">
                 <MessageAction tooltip="导出" onClick={() => setExportPanelOpen((v) => !v)}>
                   <Download className="size-3.5" />
