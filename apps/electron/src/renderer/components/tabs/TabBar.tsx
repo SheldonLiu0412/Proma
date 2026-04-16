@@ -248,7 +248,7 @@ function TabBarInner({
 
   return (
     <div className="flex items-end h-[34px] tabbar-bg relative">
-      <div className="absolute inset-0 titlebar-drag-region" />
+      <div className="absolute inset-0 titlebar-drag-region pointer-events-none" />
 
       <div className="relative flex items-end flex-1 min-w-0 overflow-x-clip titlebar-no-drag">
         {tabs.map((tab) => (
