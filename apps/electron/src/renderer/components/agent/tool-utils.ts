@@ -174,8 +174,10 @@ export function getInputSummary(
 
     case 'Glob': {
       const pattern = input.pattern
+      const path = input.path
       if (typeof pattern === 'string') {
-        return pattern
+        const suffix = typeof path === 'string' ? ` in ${path.split('/').slice(-2).join('/')}` : ''
+        return `${pattern}${suffix}`
       }
       return null
     }

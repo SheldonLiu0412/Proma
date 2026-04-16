@@ -227,6 +227,9 @@ export interface ElectronAPI {
   /** 保存应用内置资源文件到用户选择的位置（原生 Save As 对话框） */
   saveResourceFileAs: (resourceRelativePath: string, defaultFilename: string) => Promise<boolean>
 
+  /** 导出选中消息为 Markdown 文件 */
+  exportMessagesMd: (markdown: string, defaultFilename: string) => Promise<boolean>
+
   /** 删除附件 */
   deleteAttachment: (localPath: string) => Promise<void>
 
@@ -891,6 +894,10 @@ const electronAPI: ElectronAPI = {
 
   saveResourceFileAs: (resourceRelativePath: string, defaultFilename: string) => {
     return ipcRenderer.invoke(CHAT_IPC_CHANNELS.SAVE_RESOURCE_FILE_AS, resourceRelativePath, defaultFilename)
+  },
+
+  exportMessagesMd: (markdown: string, defaultFilename: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.EXPORT_MESSAGES_MD, markdown, defaultFilename)
   },
 
   deleteAttachment: (localPath: string) => {

@@ -594,6 +594,26 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  // 导出选中消息为 Markdown 文件
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.EXPORT_MESSAGES_MD,
+    async (event, markdown: string, defaultFilename: string): Promise<boolean> => {
+      const { dialog, BrowserWindow } = await import('electron')
+      const { writeFileSync } = await import('node:fs')
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getFocusedWindow()!, {
+        defaultPath: defaultFilename,
+        filters: [
+          { name: 'Markdown 文件', extensions: ['md'] },
+          { name: '所有文件', extensions: ['*'] },
+        ],
+      })
+      if (result.canceled || !result.filePath) return false
+      writeFileSync(result.filePath, markdown, 'utf-8')
+      return true
+    }
+  )
+
   // 删除附件
   ipcMain.handle(
     CHAT_IPC_CHANNELS.DELETE_ATTACHMENT,

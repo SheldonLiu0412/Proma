@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import { ImageLightbox } from '@/components/ui/image-lightbox'
 import { ContentBlock } from './ContentBlock'
 import { TaskProgressCard, TASK_TOOL_NAMES } from './TaskProgressCard'
+import { SDKExportPanel } from './SDKExportPanel'
 import { DurationBadge } from './AgentMessages'
 import {
   Message,
@@ -35,6 +36,7 @@ import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { channelsAtom } from '@/atoms/chat-atoms'
+import { currentAgentSessionAtom } from '@/atoms/agent-atoms'
 import type {
   SDKMessage,
   SDKAssistantMessage,
@@ -335,6 +337,8 @@ export interface AssistantTurnRendererProps {
 
 export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onRewind, isStreaming, stoppedByUser, sessionModelId }: AssistantTurnRendererProps): React.ReactElement | null {
   const channels = useAtomValue(channelsAtom)
+  const currentSession = useAtomValue(currentAgentSessionAtom)
+  const [exportPanelOpen, setExportPanelOpen] = React.useState(false)
   // 收集所有 assistant 消息的内容块，保留 parent_tool_use_id 关联
   interface EnrichedBlock {
     block: SDKContentBlock
@@ -555,6 +559,22 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
           <MessageActions className="pl-[46px] mt-0.5 min-h-[28px] justify-start">
             {hasDuration && <DurationBadge durationMs={durationMs!} usage={usage} />}
             {textContent && <CopyButton content={textContent} />}
+            {textContent && (
+              <div className="relative">
+                <MessageAction tooltip="导出" onClick={() => setExportPanelOpen((v) => !v)}>
+                  <Download className="size-3.5" />
+                </MessageAction>
+                {exportPanelOpen && (
+                  <SDKExportPanel
+                    messages={allMessages}
+                    sessionTitle={currentSession?.title}
+                    sessionModelId={sessionModelId ?? turn.model}
+                    triggerTurnMessages={turn.turnMessages}
+                    onClose={() => setExportPanelOpen(false)}
+                  />
+                )}
+              </div>
+            )}
             {onFork && lastUuid && (
               <MessageAction tooltip="从此处分叉" onClick={() => onFork(lastUuid)}>
                 <Split className="size-3.5" />

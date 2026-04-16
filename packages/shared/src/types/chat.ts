@@ -358,6 +358,8 @@ export const CHAT_IPC_CHANNELS = {
   SAVE_IMAGE_AS: 'chat:save-image-as',
   /** 保存应用内置资源文件到用户选择的位置（原生 Save As 对话框） */
   SAVE_RESOURCE_FILE_AS: 'chat:save-resource-file-as',
+  /** 导出选中消息为 Markdown 文件 */
+  EXPORT_MESSAGES_MD: 'chat:export-messages-md',
   /** 删除附件 */
   DELETE_ATTACHMENT: 'chat:delete-attachment',
   /** 打开文件选择对话框 */
