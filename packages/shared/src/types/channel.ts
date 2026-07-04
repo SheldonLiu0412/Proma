@@ -73,8 +73,8 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
 /**
  * 支持 Agent 模式的供应商类型
  *
- * Agent SDK 通过 Anthropic 兼容协议调用 `/v1/messages` 端点，
- * 因此所有 Anthropic 协议兼容的供应商都可以用于 Agent。
+ * 当前产品层仍只开放迁移前的 Anthropic-compatible Agent 渠道集合；
+ * 底层 Pi runtime 可支持更多 API，但这里先不扩张用户可选范围。
  */
 export const AGENT_COMPATIBLE_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>([
   'anthropic',

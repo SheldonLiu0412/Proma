@@ -8,10 +8,16 @@
 /** 始终安全的工具（免询问） */
 export const SAFE_TOOLS: readonly string[] = [
   'Read',            // 文件读取
+  'LS',              // 目录读取
   'Glob',            // 文件名搜索
   'Grep',            // 内容搜索
   'WebSearch',       // 网络搜索
   'WebFetch',        // 网页获取
+  'ListMcpResourcesTool',
+  'ReadMcpResourceTool',
+  'ListMcpResourceTemplatesTool',
+  'ListMcpPromptsTool',
+  'GetMcpPromptTool',
   'TodoRead',        // Todo 列表读取
   'TodoWrite',       // Todo 列表写入（无安全风险）
   'TaskOutput',      // 后台任务输出

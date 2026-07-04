@@ -6,14 +6,10 @@
  */
 
 import type { AgentSessionMeta, PromaPermissionMode } from '@proma/shared'
-import { injectAgentCollaborationMcpServer } from '../agent-collaboration-tools'
-import { injectAutomationMcpServer } from '../automation-agent-tools'
-import { injectNanoBananaMcpServer } from '../chat-tools/nano-banana-mcp'
+import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import { isBuiltinMcpUserEnabled } from './settings'
 
 export interface BuiltinMcpInjectContext {
-  sdk: typeof import('@anthropic-ai/claude-agent-sdk')
-  mcpServers: Record<string, Record<string, unknown>>
   sessionId: string
   channelId: string
   modelId?: string
@@ -25,32 +21,35 @@ export interface BuiltinMcpInjectContext {
   sessionMeta?: AgentSessionMeta
 }
 
-async function injectBuiltinSafely(name: string, task: () => Promise<void>): Promise<void> {
+async function buildBuiltinSafely(name: string, task: () => Promise<ToolDefinition[]>): Promise<ToolDefinition[]> {
   try {
-    await task()
+    return await task()
   } catch (error) {
-    console.error(`[Agent 编排] 注入内置 MCP 失败 (${name}):`, error)
+    console.error(`[Agent 编排] 构建内置 Pi 工具失败 (${name}):`, error)
+    return []
   }
 }
 
-export async function injectBuiltinMcpServers(ctx: BuiltinMcpInjectContext): Promise<{ collaborationAvailable: boolean }> {
+export async function buildBuiltinAgentTools(ctx: BuiltinMcpInjectContext): Promise<{ tools: ToolDefinition[]; collaborationAvailable: boolean }> {
+  const tools: ToolDefinition[] = []
+
   if (isBuiltinMcpUserEnabled('nano-banana')) {
-    await injectBuiltinSafely('nano-banana', () => injectNanoBananaMcpServer(
-      ctx.sdk,
-      ctx.mcpServers,
+    const { buildNanoBananaAgentTools } = await import('../chat-tools/nano-banana-mcp')
+    tools.push(...await buildBuiltinSafely('nano-banana', () => buildNanoBananaAgentTools(
       ctx.sessionId,
       ctx.agentCwd,
-    ))
+    )))
   }
 
   if (isBuiltinMcpUserEnabled('automation')) {
-    await injectBuiltinSafely('automation', () => injectAutomationMcpServer(ctx.sdk, ctx.mcpServers, {
+    const { buildAutomationAgentTools } = await import('../automation-agent-tools')
+    tools.push(...await buildBuiltinSafely('automation', () => buildAutomationAgentTools({
       sessionId: ctx.sessionId,
       channelId: ctx.channelId,
       modelId: ctx.modelId,
       workspaceId: ctx.workspaceId,
       triggeredBy: ctx.triggeredBy,
-    }))
+    })))
   }
 
   const collaborationAvailable = isBuiltinMcpUserEnabled('collaboration') &&
@@ -59,15 +58,16 @@ export async function injectBuiltinMcpServers(ctx: BuiltinMcpInjectContext): Pro
     (ctx.sessionMeta?.delegationDepth ?? 0) === 0
 
   if (collaborationAvailable) {
-    await injectBuiltinSafely('collaboration', () => injectAgentCollaborationMcpServer(ctx.sdk, ctx.mcpServers, {
+    const { buildAgentCollaborationTools } = await import('../agent-collaboration-tools')
+    tools.push(...await buildBuiltinSafely('collaboration', () => buildAgentCollaborationTools({
       sessionId: ctx.sessionId,
       channelId: ctx.channelId,
       modelId: ctx.modelId,
       workspaceId: ctx.workspaceId,
       permissionMode: ctx.permissionMode,
       triggeredBy: ctx.triggeredBy,
-    }))
+    })))
   }
 
-  return { collaborationAvailable }
+  return { tools, collaborationAvailable }
 }

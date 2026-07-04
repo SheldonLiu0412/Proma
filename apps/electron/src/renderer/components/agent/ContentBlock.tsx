@@ -44,6 +44,59 @@ import type {
 interface ToolResultData {
   result?: string
   isError?: boolean
+  rawContent?: unknown
+}
+
+function safeStringify(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    const serialized = JSON.stringify(value, null, 2)
+    return serialized ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function summarizeToolResultBlock(block: Record<string, unknown>): string {
+  if (block.type === 'text' && typeof block.text === 'string') return block.text
+  if (typeof block.text === 'string') return block.text
+  if (block.type === 'image') {
+    const mimeType = typeof block.mimeType === 'string'
+      ? block.mimeType
+      : typeof block.mediaType === 'string'
+        ? block.mediaType
+        : 'image'
+    const dataLength = typeof block.data === 'string' ? block.data.length : 0
+    return `[图片结果: ${mimeType}${dataLength > 0 ? `, base64 ${dataLength} chars` : ''}]`
+  }
+  if (typeof block.blob === 'string') {
+    const mimeType = typeof block.mimeType === 'string'
+      ? block.mimeType
+      : typeof block.mediaType === 'string'
+        ? block.mediaType
+        : 'binary'
+    return `[二进制结果: ${mimeType}]`
+  }
+  return safeStringify(block)
+}
+
+function summarizeToolResultContent(content: unknown): string | undefined {
+  if (typeof content === 'string') return content
+  if (content && typeof content === 'object' && !Array.isArray(content)) {
+    return summarizeToolResultBlock(content as Record<string, unknown>)
+  }
+  if (!Array.isArray(content)) return content == null ? undefined : safeStringify(content)
+  const parts = content.map((item) => {
+    if (!item || typeof item !== 'object') return safeStringify(item)
+    return summarizeToolResultBlock(item as Record<string, unknown>)
+  }).filter(Boolean)
+  return parts.length > 0 ? parts.join('\n') : undefined
+}
+
+function hasToolResultPayload(content: unknown): boolean {
+  if (typeof content === 'string') return content.length > 0
+  if (Array.isArray(content)) return content.length > 0
+  return content != null
 }
 
 /** 在 allMessages 中查找匹配 toolUseId 的工具结果 */
@@ -60,15 +113,8 @@ function useToolResult(toolUseId: string, allMessages: SDKMessage[]): ToolResult
           const resultBlock = block as SDKToolResultBlock
           if (resultBlock.tool_use_id === toolUseId) {
             let result: string | undefined
-            if (typeof resultBlock.content === 'string') {
-              result = resultBlock.content
-            } else if (Array.isArray(resultBlock.content)) {
-              result = (resultBlock.content as Array<{ type: string; text?: string }>)
-                .filter((c) => c.type === 'text' && typeof c.text === 'string')
-                .map((c) => c.text)
-                .join('\n')
-            }
-            return { result, isError: resultBlock.is_error }
+            result = summarizeToolResultContent(resultBlock.content)
+            return { result, isError: resultBlock.is_error, rawContent: resultBlock.content }
           }
         }
       }
@@ -339,7 +385,7 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   const toolResult = useToolResult(block.id, allMessages)
   const resultText = toolResult?.result
   const isError = toolResult?.isError === true
-  const shouldShowResult = !!resultText
+  const shouldShowResult = toolResult !== null && ((resultText?.length ?? 0) > 0 || hasToolResultPayload(toolResult.rawContent))
   const taskGetSummary = React.useMemo(() => {
     if (block.name !== 'TaskGet' || !resultText || isError) return null
     return parseTaskGetResult(resultText)
@@ -364,7 +410,7 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   const displayLabel = (isCompleted || !isStreaming) ? phrase.label : phrase.loadingLabel
   const filePath = extractFilePath(block.input)
   const isPreviewable = (
-    (block.name === 'Read' || block.name === 'Edit' || block.name === 'Write') &&
+    (block.name === 'Read' || block.name === 'Edit' || block.name === 'MultiEdit' || block.name === 'Write') &&
     isCompleted &&
     filePath
   )
@@ -535,7 +581,7 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
         )}
       </button>
 
-      {shouldShowResult && resultText && expanded && (
+      {shouldShowResult && expanded && (
         <div className={cn(
           'ml-5.5 mt-1 mb-2 pl-3 border-l-2 border-border/30',
           animate && 'animate-in fade-in slide-in-from-top-1 duration-150',
@@ -543,9 +589,10 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
           <ToolResultRenderer
             toolName={block.name}
             input={block.input}
-            result={resultText}
+            result={resultText ?? ''}
             isError={isError}
             basePath={basePath}
+            rawContent={toolResult?.rawContent}
           />
         </div>
       )}

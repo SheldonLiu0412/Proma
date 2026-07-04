@@ -1,7 +1,7 @@
 /**
  * Bun 运行时路径检测模块
  *
- * Bun 是 Proma 的可选组件（不影响核心 Agent 功能，SDK 自带编译好的 claude 二进制）。
+ * Bun 是 Proma 的可选组件（不影响核心 Agent 功能）。
  * 仅用于：
  * - 系统状态展示（设置页显示用户是否装了 Bun）
  * - 用户可能从终端用 Bun 跑自定义脚本时的路径探测
@@ -168,8 +168,7 @@ export function validateBunExecutable(bunPath: string): string | null {
 /**
  * 检测并返回 Bun 运行时状态
  *
- * Bun 是可选组件 —— Claude Agent SDK 0.2.113+ 分发了按平台编译的 claude native
- * binary，核心功能不依赖 Bun。这里的检测结果只用于：
+ * Bun 是可选组件，核心 Agent runtime 不依赖用户系统安装 Bun。这里的检测结果只用于：
  * - 系统运行时状态卡片展示
  * - 用户执行依赖 Bun 的自定义脚本时提供可用性提示
  *

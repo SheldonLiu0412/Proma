@@ -9,7 +9,6 @@ let manager: AgentSessionManager
 let tempHome: string
 const originalHome = process.env.HOME
 const originalPromaDev = process.env.PROMA_DEV
-const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
 
 mock.module('electron', () => ({
   app: {
@@ -47,17 +46,10 @@ function writeAgentSessionJsonl(sessionId: string, rows: string[]): void {
   writeFileSync(join(dir, `${sessionId}.jsonl`), jsonl(rows), 'utf-8')
 }
 
-function writeSdkSessionJsonl(sdkSessionId: string, rows: string[]): void {
-  const dir = join(tempHome, '.proma', 'sdk-config', 'projects', 'test-project')
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, `${sdkSessionId}.jsonl`), jsonl(rows), 'utf-8')
-}
-
 beforeAll(async () => {
   tempHome = mkdtempSync(join(os.tmpdir(), 'proma-agent-session-manager-'))
   process.env.HOME = tempHome
   process.env.PROMA_DEV = '0'
-  delete process.env.CLAUDE_CONFIG_DIR
   manager = await import('./agent-session-manager')
 })
 
@@ -71,11 +63,6 @@ afterAll(() => {
     delete process.env.PROMA_DEV
   } else {
     process.env.PROMA_DEV = originalPromaDev
-  }
-  if (originalClaudeConfigDir === undefined) {
-    delete process.env.CLAUDE_CONFIG_DIR
-  } else {
-    process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir
   }
   rmSync(tempHome, { recursive: true, force: true })
 })
@@ -93,28 +80,15 @@ describe('Agent 会话 JSONL 读取', () => {
     expect(messages.map((message) => message.type)).toEqual(['user', 'assistant'])
   })
 
-  test('Given SDK rewind JSONL 存在损坏行 When 从快照恢复文件 Then 严格失败避免误报成功', () => {
-    const cwd = join(tempHome, 'workspace')
-    mkdirSync(cwd, { recursive: true })
-    writeSdkSessionJsonl('sdk-session-with-bad-line', [
-      JSON.stringify({ type: 'user', uuid: 'user-1', message: { content: [{ type: 'text', text: '修改文件' }] } }),
+  test('Given rewind 所需 Proma JSONL 存在损坏行 When 解析下一轮用户消息 Then 严格失败避免误判快照', () => {
+    writeAgentSessionJsonl('session-rewind-bad-line', [
+      JSON.stringify({ type: 'assistant', uuid: 'assistant-1', message: { content: [{ type: 'text', text: '完成' }] } }),
       '{ 这不是合法 JSON',
-      JSON.stringify({
-        type: 'file-history-snapshot',
-        isSnapshotUpdate: false,
-        snapshot: {
-          messageId: 'user-1',
-          trackedFileBackups: {
-            'a.txt': { backupFileName: null },
-          },
-        },
-      }),
+      JSON.stringify({ type: 'user', uuid: 'user-2', message: { content: [{ type: 'text', text: '继续' }] }, parent_tool_use_id: null }),
     ])
 
-    const result = manager.rewindFilesFromSnapshot('sdk-session-with-bad-line', 'user-1', cwd)
-
-    expect(result.canRewind).toBe(false)
-    expect(result.error).toContain('JSONL 第 2 行解析失败')
+    expect(() => manager.resolveRewindUserMessageUuid('session-rewind-bad-line', 'assistant-1'))
+      .toThrow('JSONL 第 2 行解析失败')
   })
 
   test('Given 会话 JSONL 存在损坏行 When 截断 SDKMessage Then 抛错避免重写不完整历史', () => {

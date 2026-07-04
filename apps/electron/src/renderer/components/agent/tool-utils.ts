@@ -13,6 +13,7 @@ import {
   ClipboardList,
   Database,
   Download,
+  Folder,
   FilePenLine,
   SquareCheck,
   FileSearch,
@@ -44,9 +45,11 @@ import {
 /** 工具名称到图标组件的映射 */
 export const TOOL_ICONS: Record<string, LucideIcon> = {
   Edit: Pencil,
+  MultiEdit: Pencil,
   Write: FilePenLine,
   Read: FileText,
   Bash: Terminal,
+  LS: Folder,
   Glob: FolderSearch,
   Grep: Search,
   Task: GitBranch,
@@ -80,6 +83,9 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   ExitWorktree: LogOut,
   ReadMcpResourceTool: Database,
   ListMcpResourcesTool: Server,
+  ListMcpResourceTemplatesTool: Server,
+  ListMcpPromptsTool: MessageCircleQuestion,
+  GetMcpPromptTool: MessageCircleQuestion,
   SendMessage: Send,
 }
 
@@ -97,9 +103,11 @@ export function getToolIcon(toolName: string): LucideIcon {
 /** 内置工具显示名称映射 */
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
   Edit: '编辑文件',
+  MultiEdit: '批量编辑文件',
   Write: '写入文件',
   Read: '读取文件',
   Bash: '执行命令',
+  LS: '列出目录',
   Glob: '搜索文件',
   Grep: '搜索内容',
   Task: '任务工具',
@@ -133,6 +141,9 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   ExitWorktree: '退出 Worktree',
   ReadMcpResourceTool: '读取 MCP 资源',
   ListMcpResourcesTool: '列出 MCP 资源',
+  ListMcpResourceTemplatesTool: '列出 MCP 资源模板',
+  ListMcpPromptsTool: '列出 MCP Prompts',
+  GetMcpPromptTool: '读取 MCP Prompt',
   SendMessage: '发送消息',
 }
 
@@ -180,6 +191,14 @@ export function getInputSummary(
       const pattern = input.pattern
       if (typeof pattern === 'string') {
         return pattern
+      }
+      return null
+    }
+
+    case 'LS': {
+      const filePath = input.file_path ?? input.path
+      if (typeof filePath === 'string') {
+        return filePath.split(/[/\\]/).pop() || filePath
       }
       return null
     }
@@ -266,6 +285,7 @@ export function getInputSummary(
 
     case 'Read':
     case 'Edit':
+    case 'MultiEdit':
     case 'Write': {
       const filePath = input.file_path
       if (typeof filePath === 'string') {
@@ -418,6 +438,19 @@ export function getInputSummary(
       return null
     }
 
+    case 'ListMcpResourceTemplatesTool':
+    case 'ListMcpPromptsTool': {
+      const server = input.server
+      if (typeof server === 'string') return server
+      return null
+    }
+
+    case 'GetMcpPromptTool': {
+      const name = input.name
+      if (typeof name === 'string') return name
+      return null
+    }
+
     case 'SendMessage': {
       const to = input.to
       if (typeof to === 'string') return to
@@ -445,15 +478,31 @@ export function extractFilePath(
 }
 
 /**
- * 计算 Edit 工具的差异统计（新增/删除行数）
- * 仅对 Edit 工具有效，其他工具返回 null
+ * 计算 Edit / MultiEdit 工具的差异统计（新增/删除行数）
  */
 export function computeDiffStats(
   toolName: string,
   input: Record<string, unknown>
 ): { additions: number; deletions: number } | null {
-  if (toolName !== 'Edit') {
+  if (toolName !== 'Edit' && toolName !== 'MultiEdit') {
     return null
+  }
+
+  if (toolName === 'MultiEdit' && Array.isArray(input.edits)) {
+    let additions = 0
+    let deletions = 0
+    let hasPair = false
+    for (const edit of input.edits) {
+      if (!edit || typeof edit !== 'object') continue
+      const record = edit as Record<string, unknown>
+      const oldValue = record.old_string ?? record.oldText
+      const newValue = record.new_string ?? record.newText
+      if (typeof oldValue !== 'string' || typeof newValue !== 'string') continue
+      additions += newValue ? newValue.split('\n').length : 0
+      deletions += oldValue ? oldValue.split('\n').length : 0
+      hasPair = true
+    }
+    return hasPair ? { additions, deletions } : null
   }
 
   const oldString = input.old_string

@@ -14,18 +14,21 @@ import {
   getConfigDir,
   getAgentSessionsDir,
   getSdkConfigDir,
+  getAgentSidecarSnapshotsDir,
   getAgentWorkspacesDir,
   getAttachmentsDir,
   getConversationsDir,
 } from './config-paths'
-import { listAgentSessions } from './agent-session-manager'
+import { getAgentSessionSDKMessages, listAgentSessions } from './agent-session-manager'
 import { listAgentWorkspaces } from './agent-workspace-manager'
+import { AGENT_SIDECAR_BLOBS_DIR, AGENT_SIDECAR_LATEST_SNAPSHOT_FILE } from './agent-sidecar-snapshot'
 
 // ─── 类型定义 ───
 
 export type StorageCategoryKey =
   | 'agent-sessions'
   | 'sdk-config'
+  | 'agent-sidecar'
   | 'workspaces'
   | 'conversations'
   | 'attachments'
@@ -130,13 +133,171 @@ function getActiveSessionIds(): Set<string> {
   return new Set(listAgentSessions().map((s) => s.id))
 }
 
+function getReferencedSidecarSessionIds(): Set<string> {
+  const ids = new Set<string>()
+  for (const session of listAgentSessions()) {
+    ids.add(session.id)
+    if (session.forkSourceSessionId) ids.add(session.forkSourceSessionId)
+  }
+  return ids
+}
+
 function getActiveSdkSessionIds(): Set<string> {
   const ids = new Set<string>()
   for (const s of listAgentSessions()) {
     if (s.sdkSessionId) ids.add(s.sdkSessionId)
+    if (s.legacySdkSessionId) ids.add(s.legacySdkSessionId)
     if (s.forkSourceSdkSessionId) ids.add(s.forkSourceSdkSessionId)
   }
   return ids
+}
+
+function isActiveSdkSessionFile(fileName: string, activeSdkIds: Set<string>): boolean {
+  if (!fileName.endsWith('.jsonl')) return false
+  const stem = basename(fileName, '.jsonl')
+  if (activeSdkIds.has(stem)) return true
+  for (const sdkId of activeSdkIds) {
+    if (stem.includes(sdkId)) return true
+  }
+  return false
+}
+
+function isSidecarReservedEntry(name: string): boolean {
+  return name === AGENT_SIDECAR_BLOBS_DIR || name === AGENT_SIDECAR_LATEST_SNAPSHOT_FILE
+}
+
+function addBlobHashesFromSidecarMeta(meta: unknown, hashes: Set<string>): void {
+  if (!meta || typeof meta !== 'object') return
+  const roots = (meta as { roots?: unknown }).roots
+  if (!Array.isArray(roots)) return
+  for (const root of roots) {
+    const entries = (root as { entries?: unknown }).entries
+    if (!Array.isArray(entries)) continue
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue
+      const record = entry as { kind?: unknown; hash?: unknown }
+      if (record.kind === 'file' && typeof record.hash === 'string') {
+        hashes.add(record.hash)
+      }
+    }
+  }
+}
+
+async function readJsonFileSafe(filePath: string): Promise<unknown | undefined> {
+  try {
+    return JSON.parse(await fsPromises.readFile(filePath, 'utf-8')) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+async function collectReferencedSidecarBlobHashes(sessionPath: string): Promise<Set<string>> {
+  const hashes = new Set<string>()
+  const entries = await fsPromises.readdir(sessionPath).catch(() => [])
+  for (const entry of entries) {
+    if (entry === AGENT_SIDECAR_BLOBS_DIR) continue
+    if (entry === AGENT_SIDECAR_LATEST_SNAPSHOT_FILE) {
+      addBlobHashesFromSidecarMeta(await readJsonFileSafe(join(sessionPath, entry)), hashes)
+      continue
+    }
+    const snapshotPath = join(sessionPath, entry)
+    try {
+      if (!(await fsPromises.lstat(snapshotPath)).isDirectory()) continue
+      addBlobHashesFromSidecarMeta(await readJsonFileSafe(join(snapshotPath, 'snapshot.json')), hashes)
+    } catch {
+      // skip inaccessible snapshot
+    }
+  }
+  return hashes
+}
+
+async function cleanupStaleLatestSidecarIndex(
+  sessionPath: string,
+  sidecarSessionId: string,
+  activeSnapshotKeys: Set<string>,
+): Promise<CleanupResult> {
+  const latestPath = join(sessionPath, AGENT_SIDECAR_LATEST_SNAPSHOT_FILE)
+  const meta = await readJsonFileSafe(latestPath)
+  const messageUuid = meta && typeof meta === 'object'
+    ? (meta as { messageUuid?: unknown }).messageUuid
+    : undefined
+  if (typeof messageUuid !== 'string' || activeSnapshotKeys.has(`${sidecarSessionId}/${messageUuid}`)) {
+    return { freedBytes: 0, deletedCount: 0, errors: [] }
+  }
+  const freed = safeUnlink(latestPath)
+  return { freedBytes: freed, deletedCount: freed > 0 ? 1 : 0, errors: [] }
+}
+
+async function cleanupUnreferencedSidecarBlobs(sessionPath: string, referencedHashes: Set<string>): Promise<CleanupResult> {
+  const blobsDir = join(sessionPath, AGENT_SIDECAR_BLOBS_DIR)
+  let freedBytes = 0
+  let deletedCount = 0
+  const errors: string[] = []
+  if (!existsSync(blobsDir)) return { freedBytes, deletedCount, errors }
+
+  try {
+    const buckets = await fsPromises.readdir(blobsDir)
+    for (const bucket of buckets) {
+      const bucketPath = join(blobsDir, bucket)
+      try {
+        if (!(await fsPromises.lstat(bucketPath)).isDirectory()) continue
+        const files = await fsPromises.readdir(bucketPath)
+        for (const file of files) {
+          const blobPath = join(bucketPath, file)
+          try {
+            if (!(await fsPromises.lstat(blobPath)).isFile()) continue
+            if (referencedHashes.has(file)) continue
+            const freed = safeUnlink(blobPath)
+            if (freed > 0) {
+              freedBytes += freed
+              deletedCount++
+            }
+          } catch {
+            // skip inaccessible blob
+          }
+        }
+        const remaining = await fsPromises.readdir(bucketPath).catch(() => [])
+        if (remaining.length === 0) rmSync(bucketPath, { recursive: true, force: true })
+      } catch {
+        // skip inaccessible bucket
+      }
+    }
+    const remainingBuckets = await fsPromises.readdir(blobsDir).catch(() => [])
+    if (remainingBuckets.length === 0) rmSync(blobsDir, { recursive: true, force: true })
+  } catch (error) {
+    errors.push(`清理孤儿 sidecar blob 失败: ${error}`)
+  }
+
+  return { freedBytes, deletedCount, errors }
+}
+
+function mergeCleanupResult(target: CleanupResult, source: CleanupResult): void {
+  target.freedBytes += source.freedBytes
+  target.deletedCount += source.deletedCount
+  target.errors.push(...source.errors)
+}
+
+function addSidecarSnapshotKeys(keys: Set<string>, sidecarSessionId: string, sessionId: string): void {
+  for (const message of getAgentSessionSDKMessages(sessionId)) {
+    const record = message as unknown as Record<string, unknown>
+    if (
+      typeof record.uuid === 'string' &&
+      (record.type === 'user' || record.type === 'assistant' || record.type === 'system')
+    ) {
+      keys.add(`${sidecarSessionId}/${record.uuid}`)
+    }
+  }
+}
+
+function getActiveSidecarSnapshotKeys(): Set<string> {
+  const keys = new Set<string>()
+  for (const session of listAgentSessions()) {
+    addSidecarSnapshotKeys(keys, session.id, session.id)
+    if (session.forkSourceSessionId) {
+      addSidecarSnapshotKeys(keys, session.forkSourceSessionId, session.id)
+    }
+  }
+  return keys
 }
 
 function getActiveWorkspaceSlugs(): Set<string> {
@@ -196,10 +357,9 @@ async function calcSdkConfigCategory(): Promise<StorageCategory> {
             const fullPath = join(projPath, file)
             try {
               const stat = await fsPromises.stat(fullPath)
-              const sdkId = basename(file, '.jsonl')
               bytes += stat.size
               count++
-              if (!activeSdkIds.has(sdkId)) {
+              if (!isActiveSdkSessionFile(file, activeSdkIds)) {
                 orphanBytes += stat.size
                 orphanCount++
               }
@@ -230,12 +390,42 @@ async function calcSdkConfigCategory(): Promise<StorageCategory> {
     } catch { /* skip */ }
   }
 
-  // sdk-config 其他子目录（sessions, backups 等）
+  const sessionsDir = join(sdkDir, 'sessions')
+  if (existsSync(sessionsDir)) {
+    try {
+      const files = await fsPromises.readdir(sessionsDir)
+      for (const file of files) {
+        const fullPath = join(sessionsDir, file)
+        try {
+          const stat = await fsPromises.lstat(fullPath)
+          if (stat.isDirectory()) {
+            const sub = await getDirSize(fullPath)
+            bytes += sub.bytes
+            count += sub.count
+            if (!activeSdkIds.has(file)) {
+              orphanBytes += sub.bytes
+              orphanCount += sub.count
+            }
+            continue
+          }
+          if (!stat.isFile()) continue
+          bytes += stat.size
+          count++
+          if (!isActiveSdkSessionFile(file, activeSdkIds)) {
+            orphanBytes += stat.size
+            orphanCount++
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
+  }
+
+  // sdk-config 其他子目录（backups 等）
   if (existsSync(sdkDir)) {
     try {
       const entries = await fsPromises.readdir(sdkDir)
       for (const entry of entries) {
-        if (entry === 'projects' || entry === 'file-history') continue
+        if (entry === 'projects' || entry === 'file-history' || entry === 'sessions') continue
         const fullPath = join(sdkDir, entry)
         try {
           const stat = await fsPromises.lstat(fullPath)
@@ -253,8 +443,80 @@ async function calcSdkConfigCategory(): Promise<StorageCategory> {
   }
 
   return {
-    label: 'SDK 会话数据',
+    label: 'runtime 会话数据',
     key: 'sdk-config',
+    bytes, count,
+    hasOrphans: orphanCount > 0,
+    orphanBytes, orphanCount,
+  }
+}
+
+async function calcAgentSidecarCategory(): Promise<StorageCategory> {
+  const snapshotsDir = getAgentSidecarSnapshotsDir()
+  const activeSessionIds = getActiveSessionIds()
+  const referencedSessionIds = getReferencedSidecarSessionIds()
+  const activeSnapshotKeys = getActiveSidecarSnapshotKeys()
+  let bytes = 0, count = 0, orphanBytes = 0, orphanCount = 0
+
+  if (existsSync(snapshotsDir)) {
+    try {
+      const sessionDirs = await fsPromises.readdir(snapshotsDir)
+      for (const sessionId of sessionDirs) {
+        const sessionPath = join(snapshotsDir, sessionId)
+        try {
+          if (!(await fsPromises.lstat(sessionPath)).isDirectory()) continue
+          const sessionSize = await getDirSize(sessionPath)
+          bytes += sessionSize.bytes
+          count += sessionSize.count
+          if (!referencedSessionIds.has(sessionId)) {
+            orphanBytes += sessionSize.bytes
+            orphanCount += sessionSize.count
+            continue
+          }
+          if (!activeSessionIds.has(sessionId)) continue
+          const snapshotDirs = await fsPromises.readdir(sessionPath)
+          for (const messageUuid of snapshotDirs) {
+            if (isSidecarReservedEntry(messageUuid)) continue
+            const snapshotPath = join(sessionPath, messageUuid)
+            try {
+              if (!(await fsPromises.lstat(snapshotPath)).isDirectory()) continue
+              const sub = await getDirSize(snapshotPath)
+              if (!activeSnapshotKeys.has(`${sessionId}/${messageUuid}`)) {
+                orphanBytes += sub.bytes
+                orphanCount += sub.count
+              }
+            } catch { /* skip */ }
+          }
+          const referencedBlobHashes = await collectReferencedSidecarBlobHashes(sessionPath)
+          const blobsPath = join(sessionPath, AGENT_SIDECAR_BLOBS_DIR)
+          if (existsSync(blobsPath)) {
+            const buckets = await fsPromises.readdir(blobsPath).catch(() => [])
+            for (const bucket of buckets) {
+              const bucketPath = join(blobsPath, bucket)
+              try {
+                if (!(await fsPromises.lstat(bucketPath)).isDirectory()) continue
+                const files = await fsPromises.readdir(bucketPath)
+                for (const file of files) {
+                  if (referencedBlobHashes.has(file)) continue
+                  const blobPath = join(bucketPath, file)
+                  try {
+                    const stat = await fsPromises.stat(blobPath)
+                    if (!stat.isFile()) continue
+                    orphanBytes += stat.size
+                    orphanCount++
+                  } catch { /* skip */ }
+                }
+              } catch { /* skip */ }
+            }
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
+  }
+
+  return {
+    label: 'Agent 文件快照',
+    key: 'agent-sidecar',
     bytes, count,
     hasOrphans: orphanCount > 0,
     orphanBytes, orphanCount,
@@ -355,6 +617,7 @@ export async function calculateStorageStats(): Promise<StorageStats> {
   const categories = await Promise.all([
     calcAgentSessionsCategory(),
     calcSdkConfigCategory(),
+    calcAgentSidecarCategory(),
     calcWorkspacesCategory(),
     calcConversationsCategory(),
     calcAttachmentsCategory(),
@@ -446,8 +709,7 @@ async function cleanupOrphanSdkConfig(): Promise<CleanupResult> {
           const files = await fsPromises.readdir(projPath)
           for (const file of files) {
             if (!file.endsWith('.jsonl')) continue
-            const sdkId = basename(file, '.jsonl')
-            if (activeSdkIds.has(sdkId)) continue
+            if (isActiveSdkSessionFile(file, activeSdkIds)) continue
             const freed = safeUnlink(join(projPath, file))
             if (freed > 0) { freedBytes += freed; deletedCount++ }
           }
@@ -459,7 +721,7 @@ async function cleanupOrphanSdkConfig(): Promise<CleanupResult> {
         } catch { /* skip */ }
       }
     } catch (e) {
-      errors.push(`清理孤儿 SDK projects 失败: ${e}`)
+      errors.push(`清理孤儿 runtime projects 失败: ${e}`)
     }
   }
 
@@ -477,8 +739,95 @@ async function cleanupOrphanSdkConfig(): Promise<CleanupResult> {
         } catch { /* skip */ }
       }
     } catch (e) {
-      errors.push(`清理孤儿 file-history 失败: ${e}`)
+      errors.push(`清理孤儿历史 file-history 失败: ${e}`)
     }
+  }
+
+  const sessionsDir = join(sdkDir, 'sessions')
+  if (existsSync(sessionsDir)) {
+    try {
+      const files = await fsPromises.readdir(sessionsDir)
+      for (const file of files) {
+        const fullPath = join(sessionsDir, file)
+        try {
+          const stat = await fsPromises.lstat(fullPath)
+          if (stat.isDirectory()) {
+            if (activeSdkIds.has(file)) continue
+            const freed = await safeRmDir(fullPath)
+            if (freed > 0) { freedBytes += freed; deletedCount++ }
+            continue
+          }
+          if (!stat.isFile() || !file.endsWith('.jsonl')) continue
+          if (isActiveSdkSessionFile(file, activeSdkIds)) continue
+          const freed = safeUnlink(fullPath)
+          if (freed > 0) { freedBytes += freed; deletedCount++ }
+        } catch { /* skip */ }
+      }
+    } catch (e) {
+      errors.push(`清理孤儿 runtime sessions 失败: ${e}`)
+    }
+  }
+
+  return { freedBytes, deletedCount, errors }
+}
+
+async function cleanupOrphanAgentSidecar(): Promise<CleanupResult> {
+  const snapshotsDir = getAgentSidecarSnapshotsDir()
+  const activeSessionIds = getActiveSessionIds()
+  const referencedSessionIds = getReferencedSidecarSessionIds()
+  const activeSnapshotKeys = getActiveSidecarSnapshotKeys()
+  let freedBytes = 0, deletedCount = 0
+  const errors: string[] = []
+
+  if (!existsSync(snapshotsDir)) return { freedBytes, deletedCount, errors }
+
+  try {
+    const sessionDirs = await fsPromises.readdir(snapshotsDir)
+    for (const sessionId of sessionDirs) {
+      const sessionPath = join(snapshotsDir, sessionId)
+      try {
+        if (!(await fsPromises.lstat(sessionPath)).isDirectory()) continue
+        if (!referencedSessionIds.has(sessionId)) {
+          const freed = await safeRmDir(sessionPath)
+          if (freed > 0) { freedBytes += freed; deletedCount++ }
+          continue
+        }
+        if (!activeSessionIds.has(sessionId)) continue
+
+        const snapshotDirs = await fsPromises.readdir(sessionPath)
+        for (const messageUuid of snapshotDirs) {
+          if (isSidecarReservedEntry(messageUuid)) continue
+          if (activeSnapshotKeys.has(`${sessionId}/${messageUuid}`)) continue
+          const snapshotPath = join(sessionPath, messageUuid)
+          try {
+            if (!(await fsPromises.lstat(snapshotPath)).isDirectory()) continue
+            const freed = await safeRmDir(snapshotPath)
+            if (freed > 0) { freedBytes += freed; deletedCount++ }
+          } catch { /* skip */ }
+        }
+
+        const sidecarCleanup: CleanupResult = { freedBytes: 0, deletedCount: 0, errors: [] }
+        mergeCleanupResult(sidecarCleanup, await cleanupStaleLatestSidecarIndex(sessionPath, sessionId, activeSnapshotKeys))
+        mergeCleanupResult(sidecarCleanup, await cleanupUnreferencedSidecarBlobs(
+          sessionPath,
+          await collectReferencedSidecarBlobHashes(sessionPath),
+        ))
+        freedBytes += sidecarCleanup.freedBytes
+        deletedCount += sidecarCleanup.deletedCount
+        errors.push(...sidecarCleanup.errors)
+
+        try {
+          const remaining = (await fsPromises.readdir(sessionPath))
+            .filter((entry) => !isSidecarReservedEntry(entry))
+          if (remaining.length === 0) {
+            const hasReservedData = (await fsPromises.readdir(sessionPath)).length > 0
+            if (!hasReservedData) rmSync(sessionPath, { recursive: true, force: true })
+          }
+        } catch { /* skip */ }
+      } catch { /* skip */ }
+    }
+  } catch (e) {
+    errors.push(`清理孤儿 Agent 文件快照失败: ${e}`)
   }
 
   return { freedBytes, deletedCount, errors }
@@ -519,10 +868,24 @@ async function cleanupOrphanWorkspaces(): Promise<CleanupResult> {
   return { freedBytes, deletedCount, errors }
 }
 
-function cleanupArchivedSessions(beforeDays: number): CleanupResult {
+async function cleanupArchivedSessions(beforeDays: number): Promise<CleanupResult> {
   const cutoff = Date.now() - beforeDays * 24 * 60 * 60 * 1000
   const sessions = listAgentSessions()
   const sdkDir = getSdkConfigDir()
+  const sidecarSnapshotsDir = getAgentSidecarSnapshotsDir()
+  const archivedIds = new Set(sessions
+    .filter((session) => session.archived && session.updatedAt <= cutoff)
+    .map((session) => session.id))
+  const sidecarReferencedByRemaining = new Set<string>()
+  const sdkReferencedByRemaining = new Set<string>()
+  for (const session of sessions) {
+    if (archivedIds.has(session.id)) continue
+    sidecarReferencedByRemaining.add(session.id)
+    if (session.forkSourceSessionId) sidecarReferencedByRemaining.add(session.forkSourceSessionId)
+    if (session.sdkSessionId) sdkReferencedByRemaining.add(session.sdkSessionId)
+    if (session.legacySdkSessionId) sdkReferencedByRemaining.add(session.legacySdkSessionId)
+    if (session.forkSourceSdkSessionId) sdkReferencedByRemaining.add(session.forkSourceSdkSessionId)
+  }
   let freedBytes = 0, deletedCount = 0
   const errors: string[] = []
 
@@ -536,15 +899,34 @@ function cleanupArchivedSessions(beforeDays: number): CleanupResult {
       if (freed > 0) { freedBytes += freed; deletedCount++ }
     }
 
-    // 清理 SDK file-history（同步删除，safeRmDir 的同步路径）
-    if (session.sdkSessionId) {
+    // 清理历史 runtime file-history（旧版本残留）
+    if (session.sdkSessionId && !sdkReferencedByRemaining.has(session.sdkSessionId)) {
       const histDir = join(sdkDir, 'file-history', session.sdkSessionId)
       if (existsSync(histDir)) {
-        try {
-          rmSync(histDir, { recursive: true, force: true })
-          deletedCount++
-        } catch { /* skip */ }
+        const freed = await safeRmDir(histDir)
+        if (freed > 0) { freedBytes += freed; deletedCount++ }
       }
+    }
+
+    // 清理 Pi runtime sessions（文件名可能包含 sdkSessionId 而非完全等于 sdkSessionId）
+    if (session.sdkSessionId && !sdkReferencedByRemaining.has(session.sdkSessionId)) {
+      const sessionsDir = join(sdkDir, 'sessions')
+      if (existsSync(sessionsDir)) {
+        const files = await fsPromises.readdir(sessionsDir).catch(() => [])
+        for (const file of files) {
+          if (!file.endsWith('.jsonl')) continue
+          if (!file.includes(session.sdkSessionId)) continue
+          const freed = safeUnlink(join(sessionsDir, file))
+          if (freed > 0) { freedBytes += freed; deletedCount++ }
+        }
+      }
+    }
+
+    // 清理 Proma sidecar 快照
+    const sidecarSessionDir = join(sidecarSnapshotsDir, session.id)
+    if (!sidecarReferencedByRemaining.has(session.id) && existsSync(sidecarSessionDir)) {
+      const freed = await safeRmDir(sidecarSessionDir)
+      if (freed > 0) { freedBytes += freed; deletedCount++ }
     }
   }
 
@@ -574,11 +956,12 @@ export async function cleanupStorage(options: CleanupOptions): Promise<CleanupRe
       switch (cat) {
         case 'agent-sessions': merge(await cleanupOrphanAgentSessions()); break
         case 'sdk-config': merge(await cleanupOrphanSdkConfig()); break
+        case 'agent-sidecar': merge(await cleanupOrphanAgentSidecar()); break
         case 'workspaces': merge(await cleanupOrphanWorkspaces()); break
       }
     } else if (options.archivedBeforeDays > 0) {
-      if (cat === 'agent-sessions' || cat === 'sdk-config') {
-        merge(cleanupArchivedSessions(options.archivedBeforeDays))
+      if (cat === 'agent-sessions' || cat === 'sdk-config' || cat === 'agent-sidecar') {
+        merge(await cleanupArchivedSessions(options.archivedBeforeDays))
       }
     }
   }

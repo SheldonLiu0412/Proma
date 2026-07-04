@@ -10,7 +10,7 @@ import type { ToolCall, ToolResult, ToolDefinition } from '@proma/core'
 import type { ChatToolMeta, FileAttachment } from '@proma/shared'
 import { randomUUID } from 'node:crypto'
 import { getToolCredentials } from '../chat-tool-config'
-import { saveAttachment, readAttachmentAsBase64, isImageAttachment } from '../attachment-service'
+import { saveAttachment, readImageAttachmentAsBase64, isImageAttachment } from '../attachment-service'
 
 // ===== Gemini API 类型（REST API 使用 camelCase） =====
 
@@ -185,7 +185,7 @@ function collectReferenceImages(context: NanoBananaContext): GeminiPart[] {
     if (!isImageAttachment(attachment.mediaType)) continue
 
     try {
-      const base64 = readAttachmentAsBase64(attachment.localPath)
+      const base64 = readImageAttachmentAsBase64(attachment)
       parts.push({
         inlineData: {
           mimeType: attachment.mediaType,

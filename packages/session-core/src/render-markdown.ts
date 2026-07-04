@@ -13,6 +13,10 @@ const HEADING: Record<TurnRole, string> = {
   system: '## 系统',
 }
 
+function escapeToolSummaryMarkdown(value: string): string {
+  return value.replace(/[\\[\]()]/g, '\\$&')
+}
+
 /**
  * 把 TranscriptTurn[] 渲染为干净 Markdown 对话。
  * 连续同角色合并到同一标题下；工具调用以 `> [工具: …]` 引用行呈现。
@@ -36,7 +40,7 @@ export function renderTranscriptMarkdown(turns: TranscriptTurn[], opts: RenderMa
       lines.push(t.text, '')
     }
     for (const tool of t.toolSummaries) {
-      lines.push(`> [工具: ${tool}]`, '')
+      lines.push(`> [工具: ${escapeToolSummaryMarkdown(tool)}]`, '')
     }
   }
 

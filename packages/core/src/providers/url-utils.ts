@@ -46,6 +46,25 @@ function replacePathSuffix(rawUrl: string, suffix: string, replacement: string):
   }
 }
 
+function removePathSuffixForSdkBaseUrl(rawUrl: string, suffix: string): string {
+  const trimmed = rawUrl.trim()
+  try {
+    const parsed = new URL(trimmed)
+    const pathname = parsed.pathname.replace(/\/+$/, '')
+    if (!pathname.endsWith(suffix)) return normalizeBaseUrl(trimmed)
+
+    parsed.pathname = pathname.slice(0, -suffix.length) || '/'
+    parsed.search = ''
+    parsed.hash = ''
+    return trimTrailingUrlPathSlash(parsed.toString())
+  } catch {
+    const pathPart = trimmed.split(/[?#]/, 1)[0] ?? trimmed
+    const normalizedPath = pathPart.replace(/\/+$/, '')
+    if (!normalizedPath.endsWith(suffix)) return normalizeBaseUrl(trimmed)
+    return normalizedPath.slice(0, -suffix.length)
+  }
+}
+
 /**
  * 规范化 Anthropic Base URL（用于 Proma Chat 直接调用 API）
  *
@@ -98,9 +117,9 @@ export function normalizeVersionedAnthropicBaseUrl(baseUrl: string): string {
 }
 
 /**
- * 规范化 Anthropic Base URL（用于 Agent SDK 环境变量 ANTHROPIC_BASE_URL）
+ * 规范化 Anthropic Base URL（用于 Pi Agent runtime 的 anthropic-messages baseUrl）
  *
- * SDK 内部会自动拼接 /v1/messages，所以这里需要去除用户误填的路径后缀，
+ * Pi 的 Anthropic messages client 会按 SDK 语义拼接 /v1/messages，所以这里需要去除用户误填的路径后缀，
  * 只保留根路径。
  *
  * 例如：
@@ -111,11 +130,36 @@ export function normalizeVersionedAnthropicBaseUrl(baseUrl: string): string {
  * - "https://gateway.example.com/anthropic/" → "https://gateway.example.com/anthropic"
  */
 export function normalizeAnthropicBaseUrlForSdk(baseUrl: string): string {
-  return baseUrl
-    .trim()
-    .replace(/\/+$/, '')
-    .replace(/\/v\d+\/messages$/, '')
-    .replace(/\/v\d+$/, '')
+  const trimmed = baseUrl.trim()
+
+  try {
+    const parsed = new URL(trimmed)
+    const pathname = parsed.pathname.replace(/\/+$/, '')
+    const sdkBasePath = pathname
+      .replace(/\/v\d+\/messages$/, '')
+      .replace(/\/v\d+$/, '')
+
+    if (sdkBasePath !== pathname) {
+      parsed.pathname = sdkBasePath || '/'
+      parsed.search = ''
+      parsed.hash = ''
+      return trimTrailingUrlPathSlash(parsed.toString())
+    }
+
+    return normalizeBaseUrl(trimmed)
+  } catch {
+    const pathPart = trimmed.split(/[?#]/, 1)[0] ?? trimmed
+    const normalizedPath = pathPart.replace(/\/+$/, '')
+    const sdkBasePath = normalizedPath
+      .replace(/\/v\d+\/messages$/, '')
+      .replace(/\/v\d+$/, '')
+
+    if (sdkBasePath !== normalizedPath) {
+      return sdkBasePath
+    }
+
+    return normalizeBaseUrl(trimmed)
+  }
 }
 
 /**
@@ -125,6 +169,24 @@ export function normalizeAnthropicBaseUrlForSdk(baseUrl: string): string {
  */
 export function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, '')
+}
+
+/**
+ * 规范化 OpenAI 兼容 Base URL（用于 Pi Agent runtime 的 openai-completions baseUrl）
+ *
+ * Pi / OpenAI client 会按 SDK 语义拼接 /chat/completions，所以 custom 渠道若保存的是
+ * 完整 Chat Completions 端点，这里需要还原成协议根地址，避免重复拼接。
+ *
+ * 例如：
+ * - "https://api.example.com/v1" → "https://api.example.com/v1"
+ * - "https://api.example.com/v1/chat/completions" → "https://api.example.com/v1"
+ * - "https://gateway.example.com/openai/v1/chat/completions/" → "https://gateway.example.com/openai/v1"
+ */
+export function normalizeOpenAIBaseUrlForSdk(baseUrl: string): string {
+  if (hasPathSuffix(baseUrl, '/chat/completions')) {
+    return removePathSuffixForSdkBaseUrl(baseUrl, '/chat/completions')
+  }
+  return normalizeBaseUrl(baseUrl)
 }
 
 /**
@@ -165,7 +227,7 @@ export function resolveOpenAIModelsUrl(baseUrl: string): string {
  *
  * DeepSeek / Kimi 等以 `/anthropic` 为协议根路径的供应商，实际端点仍位于
  * `/anthropic/v1/messages`，因此统一走 normalizeVersionedAnthropicBaseUrl 按需补 `/v1`
- * （已含版本路径如 `/coding/v1` 的不会重复追加），与 Agent SDK 自动拼接 /v1/messages 的行为保持一致。
+ * （已含版本路径如 `/coding/v1` 的不会重复追加），与 Pi runtime 自动拼接 /v1/messages 的行为保持一致。
  */
 export function normalizeAnthropicProviderUrl(baseUrl: string, provider: ProviderType): string {
   if (
@@ -230,7 +292,7 @@ export function resolveAnthropicModelsUrl(baseUrl: string, provider: ProviderTyp
  *
  * 幂等保证：空值、非这两类 provider、以及已经是完整端点的值都原样返回，可安全重复执行。
  *
- * 注意：anthropic-compatible 渠道的 baseUrl 同时被 Agent SDK 路径
+ * 注意：anthropic-compatible 渠道的 baseUrl 同时被 Pi Agent runtime 路径
  * （normalizeAnthropicBaseUrlForSdk）消费，该函数会剥除 /v\d+/messages 后缀，
  * 因此迁移成完整 /v1/messages 端点后 SDK 路径仍能还原出与升级前一致的根地址，互不影响。
  */

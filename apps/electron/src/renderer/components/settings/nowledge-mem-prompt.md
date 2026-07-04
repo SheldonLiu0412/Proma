@@ -26,7 +26,7 @@ curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:14242/mcp/ 2>/dev/null |
 
 ## Step 0.5：与用户确认目标工作区（必须）
 
-MCP、Skills、Hooks 都是按工作区生效的，所以**必须先问清楚用户希望装到哪个工作区**。
+MCP 和 Skills 都是按工作区生效的，所以**必须先问清楚用户希望装到哪个工作区**。
 
 先列出当前所有工作区：
 
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 uvx nmem-cli status
 ```
 
-如果走方式 B，**记下"用户的 nmem 实际命令是 `uvx nmem-cli`"**——这个信息当前 Step 4 的 hooks 不直接用到（hooks 是调用 `~/.proma/scripts/` 下的 Python 脚本，跟 nmem CLI 无关），但用户排错或自己用 nmem 时需要知道。
+如果走方式 B，**记下"用户的 nmem 实际命令是 `uvx nmem-cli`"**，方便用户排错或自己用 nmem。
 
 ### 方式 C · 最后兜底 · 仅 macOS
 
@@ -135,69 +135,22 @@ cp -R /tmp/nowledge-community/nowledge-mem-proma-plugin/skills/{read-working-mem
 
 如果文件已存在，把 `nowledge-mem` 合并进已有 `servers`，**不要覆盖其他条目**。
 
-## Step 4：配置 Hooks
-编辑 `~/.proma/sdk-config/.claude/settings.json`，添加以下 hooks。如果文件已有内容则合并，不要覆盖。
+## Step 4：确认 Proma/Pi runtime 限制
 
-**先把下面所有 `<工作区名>` 替换成 Step 0.5 中用户选择的工作区**：
+当前 Proma Agent 使用 Pi runtime，不再读取旧版 `~/.proma/sdk-config/.claude/settings.json` hooks。不要再配置 `SessionStart` / `UserPromptSubmit` / `Stop` 这类 Claude JSON hooks，否则看起来写入成功但运行时不会触发。
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "PROMA_WORKSPACE_DIR=\"${PROMA_HOME}/agent-workspaces/<工作区名>\" python \"${PROMA_HOME}/scripts/read-working-memory.py\"",
-            "timeout": 15000
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python \"${PROMA_HOME}/scripts/save-to-nmem.py\" --event user-prompt-submit",
-            "timeout": 30000
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python \"${PROMA_HOME}/scripts/save-to-nmem.py\" --event stop",
-            "timeout": 30000
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "PROMA_WORKSPACE_DIR=\"${PROMA_HOME}/agent-workspaces/<工作区名>\" python \"${PROMA_HOME}/scripts/read-working-memory.py\" --rewake",
-            "timeout": 15000,
-            "async": true,
-            "asyncRewake": true,
-            "rewakeMessage": "Nowledge Mem context refreshed"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+本集成在当前版本中通过 MCP + Skills 使用：
+- MCP 提供 Nowledge Mem 的本地服务连接
+- Skills 提供读取、搜索、提炼、保存和状态检查工作流
+- `~/.proma/scripts/` 下的 Python 脚本由这些 Skills 按需调用
+
+如果用户需要"每轮自动保存/自动刷新"这类 hooks 语义，请在最终回复里提醒：当前 Proma/Pi 版本尚未提供等价的 Proma hooks 配置入口，需要等 Proma 后续实现原生 hooks 后再启用自动触发。
 
 ## Step 5：验证
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 nmem status
-python3 ~/.proma/scripts/read-working-memory.py
+PROMA_WORKSPACE_DIR="$HOME/.proma/agent-workspaces/<工作区名>" python3 ~/.proma/scripts/read-working-memory.py
 grep 'nowledge-mem:start' ~/.proma/agent-workspaces/<工作区名>/CLAUDE.md && echo "Block 已注入" || echo "Block 缺失"
 
 # 检查 5 个 skill 是否都已安装到目标工作区
@@ -221,8 +174,8 @@ done
 
 ## ⚠️ 以上步骤完成后，必须完全退出并重启 Proma，配置才会生效。
 
-MCP 和 Hooks 只在 Proma 启动时加载，不重启等于没有配置。
+MCP 和 Skills 能力会在 Proma 启动/刷新时加载；为了避免缓存状态不一致，完成安装后请重启 Proma。
 
 重启后在新会话里验证：
-1. `cat ~/.proma/logs/nm-hooks.log` — 确认有新的 SessionStart 记录
-2. 用自然语言说「帮我记住：<想存的内容>」存第一条记忆
+1. 使用 Nowledge Mem 相关 Skill 查看状态
+2. 用自然语言说「帮我记住：<想存的内容>」，让 Agent 调用已安装的保存记忆 Skill 存第一条记忆

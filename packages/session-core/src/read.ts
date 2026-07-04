@@ -27,6 +27,7 @@ export function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
         content: [{ type: 'text', text: legacy.content }],
       },
       parent_tool_use_id: null,
+      uuid: legacy.id,
       _legacy: true,
       _createdAt: legacy.createdAt,
     } as unknown as SDKMessage
@@ -40,6 +41,7 @@ export function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
         model: legacy.model,
       },
       parent_tool_use_id: null,
+      uuid: legacy.id,
       _legacy: true,
       _createdAt: legacy.createdAt,
     } as unknown as SDKMessage
@@ -53,6 +55,7 @@ export function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
         content: [{ type: 'text', text: legacy.content }],
       },
       parent_tool_use_id: null,
+      uuid: legacy.id,
       error: { message: legacy.content, errorType: legacy.errorCode },
       _legacy: true,
       _createdAt: legacy.createdAt,
@@ -68,6 +71,7 @@ export function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
   return {
     type: 'system',
     subtype: 'init',
+    uuid: legacy.id,
     _legacy: true,
     _createdAt: legacy.createdAt,
   } as unknown as SDKMessage

@@ -11,8 +11,8 @@ It is not just another chat box. Proma is meant to become a long-lived Agent wor
 ## What Proma Can Do
 
 - **Chat mode**: multi-model conversations, attachments, image input, Markdown / Mermaid / KaTeX / code highlighting, parallel conversations, system prompts, and context controls.
-- **Agent mode**: general-purpose Agent powered by `@anthropic-ai/claude-agent-sdk`, with workspace isolation, permission modes, file operations, streaming output, plan confirmation, and ask-user interactions.
-- **SubAgents / Tasks**: complex tasks can be delegated through the Claude Agent SDK Agent tool, with sub-agent calls and results shown in the message stream.
+- **Agent mode**: general-purpose Agent powered by Pi SDK (`@earendil-works/pi-coding-agent`), with workspace isolation, permission modes, file operations, streaming output, plan confirmation, and ask-user interactions.
+- **SubAgents / Tasks**: complex tasks can be delegated through Pi runtime task tools, with sub-agent calls and results shown in the message stream.
 - **Skills & MCP**: each workspace can manage its own Skills, MCP servers, and workspace files.
 - **Remote bots**: Lark / Feishu bot bridging is supported, with DingTalk and WeChat bridge entry points also present in the app.
 - **Memory and tools**: Chat and Agent can share memory, with web search, built-in Chat tools, and Agent recommendation helpers.
@@ -107,7 +107,7 @@ Proma supports Doubao-powered streaming voice input, both inside Proma and acros
 
 > **Kimi Coding Plan users**: Proma is officially whitelisted by Kimi. Using Proma with your Kimi Coding Plan subscription will not trigger any third-party client ban policy.
 
-Agent mode is powered by Claude Agent SDK, so it currently requires an Anthropic or Anthropic-compatible channel. Chat mode uses Provider Adapters from `@proma/core` to support different protocols.
+Agent mode is powered by the Pi SDK runtime and receives model, Base URL, and API key settings from Proma channels. Chat mode uses Provider Adapters from `@proma/core` to support different protocols.
 
 ## Local Data
 
@@ -207,7 +207,7 @@ bun run dist:fast
 | Code highlighting | Shiki |
 | Build | Vite + esbuild |
 | Distribution | electron-builder |
-| Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.143` |
+| Agent SDK | `@earendil-works/pi-coding-agent@0.80.3` |
 
 ## Architecture
 
@@ -235,13 +235,13 @@ Renderer state is managed with Jotai. Key atoms live in `apps/electron/src/rende
 
 ## Packaging Notes
 
-`@anthropic-ai/claude-agent-sdk` uses platform native binaries since `0.2.113+`. Proma marks the SDK as external in esbuild and includes the SDK main package plus platform subpackages in `electron-builder.yml`.
+The Pi SDK runtime is provided by `@earendil-works/pi-coding-agent`, `@earendil-works/pi-agent-core`, and `@earendil-works/pi-ai`. Proma marks these packages as main-process externals in esbuild, then runs `bun run sync:runtime-deps` before packaging to copy the runtime dependency closure into `apps/electron/node_modules/`.
 
 When changing packaging configuration, make sure:
 
-- Main-process esbuild keeps `--external:@anthropic-ai/claude-agent-sdk`.
-- `apps/electron/package.json` includes target SDK platform subpackages in `optionalDependencies`.
-- `apps/electron/electron-builder.yml` includes the SDK main package and platform subpackages in `files`.
+- Main-process esbuild keeps `@earendil-works/pi-*` runtime packages external.
+- `apps/electron/scripts/sync-runtime-deps.ts` covers the Pi runtime dependency closure and removes stale `@anthropic-ai/claude-agent-sdk*` packages.
+- `apps/electron/electron-builder.yml` packages the synced `node_modules/**/*` and unpacks native addons used by Pi / PDF.js.
 - Ordinary npm dependencies should usually be bundled into `main.cjs` by esbuild instead of being marked external.
 
 See [AGENTS.md](./AGENTS.md) for the full engineering conventions.

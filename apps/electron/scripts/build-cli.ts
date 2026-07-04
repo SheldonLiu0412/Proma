@@ -9,8 +9,8 @@
  * - 输出到 apps/electron/resources/bin/，由 electron-builder 经 extraResources
  *   打进 process.resourcesPath/bin/，运行时由主进程注入 PROMA_CLI 暴露给 skill。
  * - 本机架构编译：CI 每个 runner 即目标平台（mac arm64/x64、win x64、linux），
- *   各自产出宿主架构二进制，与 @anthropic-ai SDK native binary 的分发策略一致，
- *   无需交叉编译。
+ *   各自产出宿主架构的 Proma CLI 二进制；Pi runtime 由主进程 external 依赖
+ *   同步流程保留运行时闭包，CLI 无需交叉编译。
  *
  * 在 electron app 的 build 链中调用（见 package.json build:cli）。
  */
@@ -24,6 +24,7 @@ const color = {
   bold: '\x1b[1m',
   dim: '\x1b[2m',
   green: '\x1b[32m',
+  yellow: '\x1b[33m',
   red: '\x1b[31m',
   cyan: '\x1b[36m',
 }

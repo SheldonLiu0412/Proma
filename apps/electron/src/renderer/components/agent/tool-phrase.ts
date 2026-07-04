@@ -61,6 +61,18 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
       return phrase(`编辑 ${name}`)
     }
 
+    case 'MultiEdit': {
+      const fp = input.file_path ?? input.filePath
+      const name = typeof fp === 'string' ? filename(fp) : '文件'
+      const diff = computeDiffStats('MultiEdit', input)
+      const count = Array.isArray(input.edits) ? input.edits.length : 0
+      const label = count > 0 ? `批量编辑 ${name} ${count} 处` : `批量编辑 ${name}`
+      if (diff && (diff.additions > 0 || diff.deletions > 0)) {
+        return { ...phrase(label), diffStats: diff }
+      }
+      return phrase(label)
+    }
+
     case 'Write': {
       const fp = input.file_path ?? input.filePath
       const name = typeof fp === 'string' ? filename(fp) : '文件'
@@ -78,6 +90,12 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
         return phrase(`执行 ${truncate(cmd, 80)}`)
       }
       return phrase('执行命令')
+    }
+
+    case 'LS': {
+      const fp = input.file_path ?? input.path
+      if (typeof fp === 'string') return phrase(`列出目录 ${filename(fp)}`)
+      return phrase('列出目录')
     }
 
     case 'Grep': {
@@ -349,6 +367,28 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
       const server = input.server
       if (typeof server === 'string') return phrase(`列出 ${server} 的 MCP 资源`)
       return phrase('列出 MCP 资源')
+    }
+
+    case 'ListMcpResourceTemplatesTool': {
+      const server = input.server
+      if (typeof server === 'string') return phrase(`列出 ${server} 的 MCP 资源模板`)
+      return phrase('列出 MCP 资源模板')
+    }
+
+    case 'ListMcpPromptsTool': {
+      const server = input.server
+      if (typeof server === 'string') return phrase(`列出 ${server} 的 MCP Prompts`)
+      return phrase('列出 MCP Prompts')
+    }
+
+    case 'GetMcpPromptTool': {
+      const server = input.server
+      const name = input.name
+      if (typeof server === 'string' && typeof name === 'string') {
+        return phrase(`读取 MCP Prompt ${server} / ${name}`)
+      }
+      if (typeof name === 'string') return phrase(`读取 MCP Prompt ${name}`)
+      return phrase('读取 MCP Prompt')
     }
 
     case 'SendMessage': {

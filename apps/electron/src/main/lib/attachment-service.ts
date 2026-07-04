@@ -10,12 +10,12 @@
  * - 文件选择对话框：Electron dialog → 小文件读取为 base64，大文件返回本地路径引用
  */
 
-import { readFileSync, writeFileSync, unlinkSync, existsSync, rmSync, statSync } from 'node:fs'
-import { extname, basename, join, isAbsolute, normalize } from 'node:path'
+import { readFileSync, writeFileSync, unlinkSync, existsSync, rmSync, statSync, realpathSync } from 'node:fs'
+import { extname, basename, join, isAbsolute, resolve, relative, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { dialog, BrowserWindow } from 'electron'
 import {
-  getConfigDir,
+  getAttachmentsDir,
   getConversationAttachmentsDir,
   resolveAttachmentPath,
 } from './config-paths'
@@ -45,6 +45,9 @@ const MIME_MAP: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
   '.pdf': 'application/pdf',
   '.txt': 'text/plain',
   '.md': 'text/markdown',
@@ -94,7 +97,7 @@ const FILE_FILTERS = [
   {
     name: '支持的文件',
     extensions: [
-      'png', 'jpg', 'jpeg', 'gif', 'webp',
+      'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico',
       'pdf', 'txt', 'md', 'json', 'csv', 'xml', 'html',
       'doc', 'dot', 'docx', 'docm', 'dotx', 'dotm', 'wps', 'wpt', 'rtf',
       'xls', 'xlt', 'xlsx', 'xlsm', 'xltx', 'xltm', 'et', 'ett',
@@ -112,7 +115,7 @@ const FILE_FILTERS = [
  * 判断是否为图片附件
  */
 export function isImageAttachment(mediaType: string): boolean {
-  return IMAGE_MIME_TYPES.has(mediaType)
+  return IMAGE_MIME_TYPES.has(normalizeMediaType(mediaType))
 }
 
 /**
@@ -121,6 +124,91 @@ export function isImageAttachment(mediaType: string): boolean {
 export function getMimeType(ext: string): string {
   const normalized = ext.startsWith('.') ? ext.toLowerCase() : `.${ext.toLowerCase()}`
   return MIME_MAP[normalized] || 'application/octet-stream'
+}
+
+function getExtensionForMediaType(mediaType: string): string | undefined {
+  switch (normalizeMediaType(mediaType)) {
+    case 'image/png':
+      return '.png'
+    case 'image/jpeg':
+      return '.jpg'
+    case 'image/gif':
+      return '.gif'
+    case 'image/webp':
+      return '.webp'
+    case 'image/bmp':
+      return '.bmp'
+    case 'image/svg+xml':
+      return '.svg'
+    case 'image/x-icon':
+      return '.ico'
+    default:
+      return undefined
+  }
+}
+
+interface ImageAttachmentReadInput {
+  localPath: string
+  mediaType: string
+}
+
+function normalizeMediaType(mediaType: string): string {
+  return mediaType.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+}
+
+function isPathInsideRoot(targetPath: string, rootPath: string): boolean {
+  const relativePath = relative(rootPath, targetPath)
+  return relativePath === '' || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+}
+
+function resolveSafeAttachmentPath(localPath: string): string {
+  const trimmedPath = localPath.trim()
+  if (trimmedPath.length === 0) {
+    throw new Error('附件路径不能为空')
+  }
+
+  const attachmentsRoot = resolve(getAttachmentsDir())
+  const fullPath = isAbsolute(trimmedPath)
+    ? resolve(trimmedPath)
+    : resolve(attachmentsRoot, trimmedPath)
+
+  if (!isPathInsideRoot(fullPath, attachmentsRoot)) {
+    throw new Error(`附件路径不在附件目录内: ${localPath}`)
+  }
+
+  if (!existsSync(fullPath)) {
+    throw new Error(`附件文件不存在: ${localPath}`)
+  }
+
+  const fileStat = statSync(fullPath)
+  if (!fileStat.isFile()) {
+    throw new Error(`附件路径不是文件: ${localPath}`)
+  }
+
+  const realAttachmentsRoot = realpathSync(attachmentsRoot)
+  const realFullPath = realpathSync(fullPath)
+  if (!isPathInsideRoot(realFullPath, realAttachmentsRoot)) {
+    throw new Error(`附件路径不在附件目录内: ${localPath}`)
+  }
+
+  return realFullPath
+}
+
+function resolveSafeImageAttachmentPath(localPath: string, mediaType?: string): string {
+  const fullPath = resolveSafeAttachmentPath(localPath)
+  const extension = extname(fullPath).toLowerCase()
+  const inferredMediaType = getMimeType(extension)
+
+  if (isImageAttachment(inferredMediaType)) {
+    return fullPath
+  }
+
+  // 兼容旧版本无扩展名图片：历史剪贴板图片会以 .bin 保存，但元数据仍保留真实图片 MIME。
+  if (extension === '.bin' && mediaType && isImageAttachment(mediaType)) {
+    return fullPath
+  }
+
+  throw new Error(`只允许读取图片附件: ${localPath}`)
 }
 
 /**
@@ -145,7 +233,7 @@ export function saveAttachment(input: AttachmentSaveInput): AttachmentSaveResult
   const dir = getConversationAttachmentsDir(conversationId)
 
   // 生成唯一文件名
-  const ext = extname(filename) || '.bin'
+  const ext = extname(filename) || getExtensionForMediaType(mediaType) || '.bin'
   const id = randomUUID()
   const storedFilename = `${id}${ext}`
   const localPath = `${conversationId}/${storedFilename}`
@@ -172,30 +260,25 @@ export function saveAttachment(input: AttachmentSaveInput): AttachmentSaveResult
  *
  * 支持两种路径格式：
  * 1. 相对路径 {conversationId}/{uuid}.ext → 解析到 ~/.proma/attachments/
- * 2. 绝对路径（Agent 工作区附件）→ 需在 ~/.proma/ 目录下，直接读取
+ * 2. 绝对路径 → 必须位于 ~/.proma/attachments/ 内
  *
  * @param localPath 相对路径或绝对路径
  * @returns base64 编码的文件数据
  */
 export function readAttachmentAsBase64(localPath: string): string {
-  let fullPath: string
+  const fullPath = resolveSafeImageAttachmentPath(localPath)
+  const buffer = readFileSync(fullPath)
+  return buffer.toString('base64')
+}
 
-  if (isAbsolute(localPath)) {
-    // 绝对路径：验证在 ~/.proma/ 目录下，防止路径穿越
-    const configDir = getConfigDir()
-    const normalized = normalize(localPath)
-    if (!normalized.startsWith(configDir)) {
-      throw new Error(`附件路径不在安全目录内: ${localPath}`)
-    }
-    fullPath = normalized
-  } else {
-    fullPath = resolveAttachmentPath(localPath)
-  }
-
-  if (!existsSync(fullPath)) {
-    throw new Error(`附件文件不存在: ${localPath}`)
-  }
-
+/**
+ * 按附件元数据读取图片并返回 base64 编码。
+ *
+ * 老版本剪贴板图片可能保存为 `.bin`，但 FileAttachment.mediaType 仍是 image/png。
+ * Chat / Nano Banana 发送给 vision provider 时使用此入口，避免只按扩展名误拒绝历史图片。
+ */
+export function readImageAttachmentAsBase64(attachment: ImageAttachmentReadInput): string {
+  const fullPath = resolveSafeImageAttachmentPath(attachment.localPath, attachment.mediaType)
   const buffer = readFileSync(fullPath)
   return buffer.toString('base64')
 }

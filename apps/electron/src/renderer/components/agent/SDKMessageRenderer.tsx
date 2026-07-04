@@ -55,7 +55,7 @@ import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/l
 import { userProfileAtom } from '@/atoms/user-profile'
 import { channelsAtom, modelSelectorOpenAtom } from '@/atoms/chat-atoms'
 import { agentProcessGroupsKeepExpandedAtom, agentSessionPendingFilesAtom } from '@/atoms/agent-atoms'
-import { agentSessionsAtom } from '@/atoms/agent-atoms'
+import { agentSessionsAtom, agentWorkspacesAtom } from '@/atoms/agent-atoms'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { automationsAtom, automationFormAtom, automationToDraft } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
@@ -77,6 +77,7 @@ import type {
 } from '@proma/shared'
 import type { AgentPendingFile } from '@proma/shared'
 import {
+  getSDKCompactStatus,
   THINKING_SIGNATURE_ERROR_CODE,
   THINKING_SIGNATURE_ERROR_TITLE,
   THINKING_SIGNATURE_ERROR_MESSAGE,
@@ -97,6 +98,15 @@ export interface SDKMessageRendererProps {
   showHeader?: boolean
   /** 用户在前端选择的模型 ID（优先用于显示名称） */
   sessionModelId?: string
+}
+
+interface SDKMessageSessionRecord {
+  session_id?: unknown
+}
+
+function getMessageSessionId(message: SDKMessage): string | null {
+  const sessionId = (message as SDKMessageSessionRecord).session_id
+  return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : null
 }
 
 // ===== system 消息：上下文压缩分割线 =====
@@ -132,7 +142,7 @@ function PermissionDeniedNotice({ message }: { message: SDKSystemMessage }): Rea
         <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-foreground">自动审批已拒绝操作</span>
+            <span className="font-medium text-foreground">权限检查已拒绝操作</span>
             {toolName && (
               <span className="rounded bg-background/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
                 {toolName}
@@ -166,6 +176,38 @@ export function CompactingIndicator(): React.ReactElement {
   )
 }
 
+function CompactStatusNotice({ message, active = false }: { message: SDKSystemMessage; active?: boolean }): React.ReactElement | null {
+  const compactStatus = getSDKCompactStatus(message)
+  if (compactStatus === 'success') return <CompactBoundaryDivider />
+  if (compactStatus === 'compacting') {
+    if (active) return <CompactingIndicator />
+    return (
+      <div className="flex items-center gap-3 my-4 px-1">
+        <div className="flex-1 h-px bg-border/40" />
+        <span className="shrink-0 text-[11px] text-muted-foreground/60 px-2 py-0.5 rounded-full border border-border/30 bg-muted/20">
+          开始压缩上下文
+        </span>
+        <div className="flex-1 h-px bg-border/40" />
+      </div>
+    )
+  }
+  if (compactStatus === 'failed') {
+    const error = typeof message.compact_error === 'string' ? message.compact_error : undefined
+    return (
+      <div className="my-3 pl-[46px] pr-1">
+        <div className="flex items-start gap-2.5 rounded-md border border-destructive/25 bg-destructive/5 px-3 py-2.5 text-xs text-foreground/80">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+          <div className="min-w-0 space-y-1">
+            <div className="font-medium text-foreground">上下文压缩失败</div>
+            {error && <p className="break-words text-muted-foreground">{error}</p>}
+          </div>
+        </div>
+      </div>
+    )
+  }
+  return null
+}
+
 // extractMeta / MessageMeta 已迁移至 @proma/session-core
 
 /** 从 turn 消息列表中提取 result 消息的耗时和用量数据 */
@@ -177,9 +219,15 @@ function extractTurnUsage(turnMessages: SDKMessage[]): { durationMs?: number; us
     const durationMs = typeof raw._durationMs === 'number' ? raw._durationMs : undefined
     const u = resultMsg.usage
     if (!u) return { durationMs }
-    const contextWindow = resultMsg.modelUsage
-      ? Object.values(resultMsg.modelUsage)[0]?.contextWindow
-      : undefined
+    // 多 entry 场景（Task 子 Agent 等）：取最大 contextWindow
+    let contextWindow: number | undefined
+    if (resultMsg.modelUsage) {
+      for (const info of Object.values(resultMsg.modelUsage)) {
+        if (info?.contextWindow && (contextWindow === undefined || info.contextWindow > contextWindow)) {
+          contextWindow = info.contextWindow
+        }
+      }
+    }
     return {
       durationMs,
       usage: {
@@ -549,9 +597,8 @@ export function AssistantTurnRenderer({ turn, allMessages, historicalTaskSubject
           .map((b) => (b as { text: string }).text)
           .join('\n\n')
         // 仅取主线 assistant 消息的 uuid 作为 fork/rewind 截断点。
-        // SDK forkSession 内部会过滤掉 sidechain（parent_tool_use_id 非空的子代理消息），
-        // 若把子代理 uuid 传过去会触发 "Message <uuid> not found in session" 错误。
-        const mainlineAssistants = turn.assistantMessages.filter((m) => !m.parent_tool_use_id)
+        // 子代理消息属于 sidechain（parent_tool_use_id 非空），不能作为 Proma 截断锚点。
+        const mainlineAssistants = turn.assistantMessages.filter((m) => !m.parent_tool_use_id && !!m.uuid)
         const lastUuid = mainlineAssistants.length > 0
           ? mainlineAssistants[mainlineAssistants.length - 1]?.uuid
           : undefined
@@ -661,15 +708,12 @@ export function SDKMessageRenderer({
   if (msgType === 'system') {
     const sysMsg = message as SDKSystemMessage
     const subtype = sysMsg.subtype
+    const compactStatus = getSDKCompactStatus(sysMsg)
 
-    if (subtype === 'compact_boundary') {
-      return <CompactBoundaryDivider />
-    }
+    if (compactStatus) return <CompactStatusNotice message={sysMsg} />
     if (subtype === 'permission_denied') {
       return <PermissionDeniedNotice message={sysMsg} />
     }
-
-    // compacting 事件已由 isCompacting flag 驱动的尾部指示器接管（见 AgentMessages），此处不再渲染持久条目
 
     return null
   }
@@ -739,11 +783,26 @@ export function isImageFile(filename: string): boolean {
 }
 
 /** 图片附件缩略图，点击可预览大图 */
-function AttachedImageThumb({ file, onEditComplete }: { file: AttachedFileRef; onEditComplete?: (editedDataUrl: string) => void }): React.ReactElement {
+function AttachedImageThumb({
+  file,
+  sessionId,
+  workspaceSlug,
+  onEditComplete,
+}: {
+  file: AttachedFileRef
+  sessionId: string | null
+  workspaceSlug?: string
+  onEditComplete?: (editedDataUrl: string) => void
+}): React.ReactElement {
   const [imageSrc, setImageSrc] = React.useState<string | null>(null)
   const [lightboxOpen, setLightboxOpen] = React.useState(false)
 
   React.useEffect(() => {
+    if (!sessionId) {
+      setImageSrc(null)
+      return
+    }
+
     const ext = file.filename.split('.').pop()?.toLowerCase() ?? 'png'
     const mimeMap: Record<string, string> = {
       png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
@@ -752,14 +811,18 @@ function AttachedImageThumb({ file, onEditComplete }: { file: AttachedFileRef; o
     const mediaType = mimeMap[ext] ?? 'image/png'
 
     window.electronAPI
-      .readAttachment(file.path)
+      .readAttachedFile(file.path, sessionId, workspaceSlug)
       .then((base64) => setImageSrc(`data:${mediaType};base64,${base64}`))
       .catch((err) => console.error('[AttachedImageThumb] 读取附件失败:', err))
-  }, [file.path, file.filename])
+  }, [file.path, file.filename, sessionId, workspaceSlug])
 
   const handleSave = React.useCallback((): void => {
-    window.electronAPI.saveImageAs(file.path, file.filename)
-  }, [file.path, file.filename])
+    if (!imageSrc) return
+    const link = document.createElement('a')
+    link.href = imageSrc
+    link.download = file.filename
+    link.click()
+  }, [file.filename, imageSrc])
 
   if (!imageSrc) {
     return <div className="w-[200px] h-[140px] rounded-lg bg-muted/30 animate-pulse shrink-0" />
@@ -886,13 +949,22 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
   const { files: attachedFiles, quotes, text } = parseAttachedFiles(stripScheduledRunMarker(rawText))
   const imageFiles = attachedFiles.filter((f) => isImageFile(f.filename))
   const activeSessionId = useAtomValue(activeSessionIdAtom)
+  const sessions = useAtomValue(agentSessionsAtom)
+  const workspaces = useAtomValue(agentWorkspacesAtom)
   const setSessionPendingFiles = useSetAtom(agentSessionPendingFilesAtom)
   const nonImageFiles = attachedFiles.filter((f) => !isImageFile(f.filename))
   const meta = extractMeta(message as unknown as SDKMessage)
+  const messageSessionId = getMessageSessionId(message as unknown as SDKMessage) ?? activeSessionId
+  const messageWorkspaceSlug = React.useMemo(() => {
+    if (!messageSessionId) return undefined
+    const workspaceId = sessions.find((session) => session.id === messageSessionId)?.workspaceId
+    if (!workspaceId) return undefined
+    return workspaces.find((workspace) => workspace.id === workspaceId)?.slug
+  }, [messageSessionId, sessions, workspaces])
 
   const handleImageEditComplete = React.useCallback((editedDataUrl: string): void => {
     const base64 = editedDataUrl.split(',')[1]
-    if (!base64 || !activeSessionId) return
+    if (!base64 || !messageSessionId) return
 
     const id = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const pending: AgentPendingFile = {
@@ -909,12 +981,12 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
     window.__pendingAgentFileData.set(id, base64)
 
     setSessionPendingFiles((prev) => {
-      const sessionFiles = prev.get(activeSessionId) ?? []
+      const sessionFiles = prev.get(messageSessionId) ?? []
       const map = new Map(prev)
-      map.set(activeSessionId, [...sessionFiles, pending])
+      map.set(messageSessionId, [...sessionFiles, pending])
       return map
     })
-  }, [activeSessionId, setSessionPendingFiles])
+  }, [messageSessionId, setSessionPendingFiles])
 
   return (
     <Message from="user">
@@ -947,7 +1019,13 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
         {imageFiles.length > 0 && (
           <div className="flex flex-wrap gap-2.5 mb-2">
             {imageFiles.map((file) => (
-              <AttachedImageThumb key={file.path} file={file} onEditComplete={handleImageEditComplete} />
+              <AttachedImageThumb
+                key={file.path}
+                file={file}
+                sessionId={messageSessionId}
+                workspaceSlug={messageWorkspaceSlug}
+                onEditComplete={handleImageEditComplete}
+              />
             ))}
           </div>
         )}
@@ -1254,8 +1332,7 @@ export function MessageGroupRenderer({ group, allMessages, historicalTaskSubject
 
   if (group.type === 'system') {
     const subtype = group.message.subtype
-    if (subtype === 'compact_boundary') return <div data-message-id={groupId}><CompactBoundaryDivider /></div>
-    if (subtype === 'compacting') return <div data-message-id={groupId}><CompactingIndicator /></div>
+    if (getSDKCompactStatus(group.message)) return <div data-message-id={groupId}><CompactStatusNotice message={group.message} active={isStreaming} /></div>
     if (subtype === 'permission_denied') return <div data-message-id={groupId}><PermissionDeniedNotice message={group.message} /></div>
     return null
   }

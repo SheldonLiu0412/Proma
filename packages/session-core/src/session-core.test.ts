@@ -2,6 +2,7 @@ import { test, expect, describe } from 'bun:test'
 import {
   readSessionMessagesFromString,
   groupIntoTurns,
+  getGroupPreview,
   toTranscript,
   searchTurns,
   selectTurns,
@@ -65,6 +66,23 @@ describe('工具折叠 ×N', () => {
   })
 })
 
+describe('SDK 压缩状态分组', () => {
+  test('status 压缩事件独立成组并生成预览', () => {
+    const raw = jsonl([
+      { type: 'user', message: { content: [{ type: 'text', text: '压缩测试' }] }, parent_tool_use_id: null },
+      { type: 'assistant', message: { id: 'a1', content: [{ type: 'text', text: '准备压缩' }] }, parent_tool_use_id: null },
+      { type: 'system', subtype: 'status', status: 'compacting' },
+      { type: 'system', subtype: 'status', compact_result: 'failed', compact_error: 'token budget exhausted' },
+    ])
+
+    const groups = groupIntoTurns(readSessionMessagesFromString(raw))
+
+    expect(groups.map((g) => g.type)).toEqual(['user', 'assistant-turn', 'system', 'system'])
+    expect(getGroupPreview(groups[2]!)).toBe('正在压缩上下文...')
+    expect(getGroupPreview(groups[3]!)).toBe('上下文压缩失败')
+  })
+})
+
 describe('旧扁平格式（格式 A）归一', () => {
   const raw = jsonl([
     { id: '1', role: 'user', content: '你好', createdAt: 1 },
@@ -114,5 +132,15 @@ describe('容错与渐进式读取原语', () => {
     expect(md).toContain('## 用户')
     expect(md).toContain('## 助手')
     expect(md).toContain('答案含关键词 needle')
+  })
+
+  test('renderTranscriptMarkdown 转义工具摘要中的链接片段', () => {
+    const md = renderTranscriptMarkdown(
+      [{ index: 0, role: 'assistant', text: '', toolSummaries: ['Read](https://example.com) [x]'], preview: '', tokens: 0 }],
+      { header: false },
+    )
+
+    expect(md).toBe('## 助手\n\n> [工具: Read\\]\\(https://example.com\\) \\[x\\]]\n')
+    expect(md).not.toContain('Read](https://example.com)')
   })
 })

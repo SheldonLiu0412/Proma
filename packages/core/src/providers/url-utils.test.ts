@@ -3,6 +3,7 @@ import {
   normalizeAnthropicBaseUrl,
   normalizeVersionedAnthropicBaseUrl,
   normalizeAnthropicBaseUrlForSdk,
+  normalizeOpenAIBaseUrlForSdk,
   normalizeBaseUrl,
   normalizeAnthropicProviderUrl,
   resolveOpenAIChatCompletionsUrl,
@@ -70,6 +71,21 @@ describe('normalizeAnthropicBaseUrlForSdk', () => {
     expect(normalizeAnthropicBaseUrlForSdk('https://api.anthropic.com/v1/messages')).toBe('https://api.anthropic.com')
   })
 
+  test('完整 messages 端点还原时移除查询参数和 hash', () => {
+    expect(normalizeAnthropicBaseUrlForSdk('https://api.anthropic.com/v1/messages?api-version=2024#stream')).toBe(
+      'https://api.anthropic.com',
+    )
+    expect(normalizeAnthropicBaseUrlForSdk('https://gateway.example.com/anthropic/v2/messages?x=1')).toBe(
+      'https://gateway.example.com/anthropic',
+    )
+  })
+
+  test('版本路径还原时移除查询参数和 hash', () => {
+    expect(normalizeAnthropicBaseUrlForSdk('https://gateway.example.com/anthropic/v1?api-version=2024#models')).toBe(
+      'https://gateway.example.com/anthropic',
+    )
+  })
+
   test('保留 /anthropic 协议根路径', () => {
     expect(normalizeAnthropicBaseUrlForSdk('https://gateway.example.com/anthropic/v1/messages')).toBe(
       'https://gateway.example.com/anthropic',
@@ -84,6 +100,30 @@ describe('normalizeBaseUrl', () => {
   test('仅去除尾部斜杠', () => {
     expect(normalizeBaseUrl('https://api.openai.com/v1/')).toBe('https://api.openai.com/v1')
     expect(normalizeBaseUrl('https://api.openai.com/v1')).toBe('https://api.openai.com/v1')
+  })
+})
+
+describe('normalizeOpenAIBaseUrlForSdk', () => {
+  test('完整 chat/completions 端点还原为协议根地址', () => {
+    expect(normalizeOpenAIBaseUrlForSdk('https://api.example.com/v1/chat/completions')).toBe(
+      'https://api.example.com/v1',
+    )
+  })
+
+  test('去除尾部斜杠后还原端点', () => {
+    expect(normalizeOpenAIBaseUrlForSdk('https://gateway.example.com/openai/v1/chat/completions/')).toBe(
+      'https://gateway.example.com/openai/v1',
+    )
+  })
+
+  test('非端点地址保持 Base URL 语义', () => {
+    expect(normalizeOpenAIBaseUrlForSdk('https://api.example.com/v1/')).toBe('https://api.example.com/v1')
+  })
+
+  test('还原端点时移除查询参数以保持 Base URL 语义', () => {
+    expect(normalizeOpenAIBaseUrlForSdk('https://api.example.com/v1/chat/completions?api-version=2024')).toBe(
+      'https://api.example.com/v1',
+    )
   })
 })
 
@@ -299,7 +339,7 @@ describe('migrateCompatibleChannelBaseUrl', () => {
   })
 
   test('迁移后的 anthropic-compatible 端点经 SDK 归一化可还原为升级前的根地址', () => {
-    // 关键不变量：channel.baseUrl 同时被 Agent SDK 路径消费（normalizeAnthropicBaseUrlForSdk 剥除 /v\d+/messages）
+    // 关键不变量：channel.baseUrl 同时被 Pi Agent runtime 路径消费（normalizeAnthropicBaseUrlForSdk 剥除 /v\d+/messages）
     const migrated = migrateCompatibleChannelBaseUrl('https://gateway.example.com/anthropic', 'anthropic-compatible')
     expect(normalizeAnthropicBaseUrlForSdk(migrated)).toBe(
       normalizeAnthropicBaseUrlForSdk('https://gateway.example.com/anthropic'),

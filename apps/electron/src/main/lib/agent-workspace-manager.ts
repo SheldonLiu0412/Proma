@@ -198,7 +198,6 @@ export function createAgentWorkspace(name: string): AgentWorkspace {
   }
 
   getAgentWorkspacePath(slug)
-  ensurePluginManifest(slug, name)
   copyDefaultSkills(slug)
 
   index.workspaces.unshift(workspace)
@@ -298,16 +297,12 @@ export function ensureDefaultWorkspace(): AgentWorkspace {
     }
 
     getAgentWorkspacePath('default')
-    ensurePluginManifest('default', '默认工作区')
     copyDefaultSkills('default')
 
     index.workspaces.push(defaultWs)
     writeIndex(index)
 
     console.log('[Agent 工作区] 已创建默认工作区')
-  } else {
-    // 迁移兼容：确保已有默认工作区包含 plugin manifest
-    ensurePluginManifest(defaultWs.slug, defaultWs.name)
   }
 
   return defaultWs
@@ -449,29 +444,6 @@ function compareSemver(a: string, b: string): number {
   return 0
 }
 
-// ===== Plugin Manifest（SDK 插件发现） =====
-
-/** 确保工作区包含 .claude-plugin/plugin.json，SDK 需要此文件发现 skills */
-export function ensurePluginManifest(workspaceSlug: string, workspaceName: string): void {
-  const wsPath = getAgentWorkspacePath(workspaceSlug)
-  const pluginDir = join(wsPath, '.claude-plugin')
-  const manifestPath = join(pluginDir, 'plugin.json')
-
-  if (existsSync(manifestPath)) return
-
-  if (!existsSync(pluginDir)) {
-    mkdirSync(pluginDir, { recursive: true })
-  }
-
-  const manifest = {
-    name: `proma-workspace-${workspaceSlug}`,
-    version: '1.0.0',
-  }
-
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8')
-  console.log(`[Agent 工作区] 已创建 plugin manifest: ${workspaceSlug}`)
-}
-
 // ===== MCP 配置管理 =====
 
 export function normalizeWorkspaceMcpConfig(config: Partial<WorkspaceMcpConfig>): WorkspaceMcpConfig {
@@ -488,6 +460,9 @@ export function normalizeWorkspaceMcpConfig(config: Partial<WorkspaceMcpConfig>)
     const entryRecord = { ...(rawEntry as unknown as Record<string, unknown>) }
     const entry = entryRecord as unknown as WorkspaceMcpConfig['servers'][string] & { type?: unknown }
     const normalizedType = normalizeMcpTransportType(entry.type)
+    if (entryRecord.cwd !== undefined && typeof entryRecord.cwd !== 'string') {
+      delete entryRecord.cwd
+    }
 
     if (normalizedType) {
       if (entry.type !== normalizedType) {
@@ -1131,6 +1106,92 @@ export function writeWorkspaceAutoMemoryFile(workspaceSlug: string, relativePath
   }
   writeFileSync(abs, content, 'utf-8')
   console.log(`[Agent 工作区] 已更新 auto memory 文件: ${workspaceSlug}/${relativePath}`)
+}
+
+/** auto memory 注入上下文的总字节预算，避免记忆膨胀挤占对话 token */
+const AUTO_MEMORY_CONTEXT_MAX_BYTES = 64 * 1024
+
+/**
+ * 读取工作区 auto memory 目录（`.claude/memory/`）的全部文本内容，拼成可注入上下文的字符串。
+ *
+ * MEMORY.md 索引置顶，其余主题文件按路径排序追加，每个文件前加 `### 相对路径` 标题。
+ * 超过 AUTO_MEMORY_CONTEXT_MAX_BYTES 预算后停止追加并给出提示，剩余文件靠 Read 按需读取。
+ *
+ * 背景：迁移前 Claude SDK 通过 autoMemoryDirectory 设置原生把该目录注入上下文；
+ * Pi SDK 无 memory 概念，改由 Proma 在 buildDynamicContext 中主动注入以保持等价效果。
+ *
+ * @returns 拼好的记忆正文；目录不存在或无有效文本内容时返回 undefined。
+ */
+export function buildAutoMemoryContextBlock(workspaceSlug: string): string | undefined {
+  const dir = getWorkspaceAutoMemoryPath(workspaceSlug)
+  if (!existsSync(dir)) return undefined
+
+  // 收集目录下全部文本文件的相对路径（跳过点文件与二进制文件）
+  const relPaths: string[] = []
+  const walk = (current: string, depth: number): void => {
+    if (depth > SKILL_TREE_MAX_DEPTH) return
+    let entries: import('node:fs').Dirent[]
+    try {
+      entries = readdirSync(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const absPath = join(current, entry.name)
+      if (entry.isDirectory()) {
+        walk(absPath, depth + 1)
+      } else if (entry.isFile()) {
+        let size = 0
+        try {
+          size = statSync(absPath).size
+        } catch {
+          continue
+        }
+        if (isLikelyBinaryFile(absPath, size)) continue
+        relPaths.push(relative(dir, absPath).split(/[\\/]/).join('/'))
+      }
+    }
+  }
+  walk(dir, 0)
+
+  if (relPaths.length === 0) return undefined
+
+  // MEMORY.md 索引优先，其余按路径字典序
+  relPaths.sort((a, b) => {
+    if (a === AUTO_MEMORY_INDEX) return -1
+    if (b === AUTO_MEMORY_INDEX) return 1
+    return a.localeCompare(b)
+  })
+
+  const parts: string[] = []
+  let usedBytes = 0
+  let truncated = false
+  for (const rel of relPaths) {
+    let content = ''
+    try {
+      content = readFileSync(join(dir, rel), 'utf-8')
+    } catch {
+      continue
+    }
+    if (content.trim().length === 0) continue
+    const block = `### ${rel}\n${content.trim()}`
+    const blockBytes = Buffer.byteLength(block, 'utf-8')
+    if (usedBytes + blockBytes > AUTO_MEMORY_CONTEXT_MAX_BYTES) {
+      truncated = true
+      break
+    }
+    parts.push(block)
+    usedBytes += blockBytes
+  }
+
+  if (parts.length === 0) return undefined
+
+  let body = parts.join('\n\n')
+  if (truncated) {
+    body += `\n\n（auto memory 内容超出注入上限，其余文件未展开，可用 Read 工具按需读取 ${AUTO_MEMORY_DIR}/ 下的文件）`
+  }
+  return body
 }
 
 /** 把相对路径限制在 Skill 根目录内，并拒绝直接覆盖 SKILL.md */

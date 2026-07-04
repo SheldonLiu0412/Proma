@@ -39,8 +39,10 @@ import {
 } from '@/atoms/notifications'
 import {
   longTextPasteAsAttachmentEnabledAtom,
+  richTextRenderingEnabledAtom,
   stickyUserMessageEnabledAtom,
   updateLongTextPasteAsAttachmentEnabled,
+  updateRichTextRenderingEnabled,
   updateStickyUserMessageEnabled,
 } from '@/atoms/ui-preferences'
 import { cn } from '@/lib/utils'
@@ -64,6 +66,7 @@ export function GeneralSettings(): React.ReactElement {
   const [notificationSounds, setNotificationSounds] = useAtom(notificationSoundsAtom)
   const [stickyUserMessageEnabled, setStickyUserMessageEnabled] = useAtom(stickyUserMessageEnabledAtom)
   const [longTextPasteAsAttachmentEnabled, setLongTextPasteAsAttachmentEnabled] = useAtom(longTextPasteAsAttachmentEnabledAtom)
+  const [richTextRenderingEnabled, setRichTextRenderingEnabled] = useAtom(richTextRenderingEnabledAtom)
   const [isEditingName, setIsEditingName] = React.useState(false)
   const [nameInput, setNameInput] = React.useState(userProfile.userName)
   const [showEmojiPicker, setShowEmojiPicker] = React.useState(false)
@@ -331,6 +334,15 @@ export function GeneralSettings(): React.ReactElement {
               updateLongTextPasteAsAttachmentEnabled(checked)
             }}
           />
+          <SettingsToggle
+            label="输入框 Markdown 渲染"
+            description="开启后，输入框中的 Markdown 语法（如 **粗体**、# 标题）会实时渲染为富文本；关闭后为纯文本模式，保留 @ 引用等功能"
+            checked={richTextRenderingEnabled}
+            onCheckedChange={(checked) => {
+              setRichTextRenderingEnabled(checked)
+              updateRichTextRenderingEnabled(checked)
+            }}
+          />
         </SettingsCard>
       </SettingsSection>
     </div>
@@ -374,7 +386,7 @@ function SoundPicker({ label, type, sounds, disabled, onSoundChange }: SoundPick
           size="icon"
           className="h-8 w-8 shrink-0"
           disabled={disabled || currentId === 'none'}
-          onClick={() => playNotificationSound(currentId)}
+          onClick={() => { void playNotificationSound(currentId) }}
           title="试听"
         >
           <Volume2 size={14} />

@@ -28,7 +28,7 @@ import type {
   AgentExternalRunSource,
   AgentMessage,
 } from '@proma/shared'
-import { ClaudeAgentAdapter, scanAndKillOrphanedClaudeSubprocesses } from './adapters/claude-agent-adapter'
+import { PiAgentAdapter, cleanupPiRuntimeResources } from './adapters/pi-agent-adapter'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentOrchestrator } from './agent-orchestrator'
 import { getAgentSessionWorkspacePath, getWorkspaceFilesDir } from './config-paths'
@@ -38,7 +38,7 @@ import { setAgentStopper, setHeadlessAgentRunner } from './agent-headless-runner
 // ===== 实例创建 =====
 
 const eventBus = new AgentEventBus()
-const adapter = new ClaudeAgentAdapter()
+const adapter = new PiAgentAdapter()
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
 
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
@@ -341,13 +341,13 @@ export function stopAllAgents(): void {
 }
 
 /**
- * 退出前最后兜底：扫描并强杀所有孤儿 claude-agent-sdk 子进程
+ * 退出前清理 Agent runtime 资源
  *
- * 必须在 stopAllAgents() 之后调用。针对 pidMap 未覆盖、dispose 漏杀等极端场景。
+ * 必须在 stopAllAgents() 之后调用。
  * 同步执行，不 await，确保 before-quit 能在 Electron 超时前完成。
  */
-export function killOrphanedClaudeSubprocesses(): void {
-  scanAndKillOrphanedClaudeSubprocesses()
+export function cleanupAgentRuntimeResources(): void {
+  cleanupPiRuntimeResources()
 }
 
 /**
@@ -364,7 +364,7 @@ export async function updateAgentPermissionMode(sessionId: string, mode: PromaPe
 /**
  * 在 Agent 流式中追加发送消息
  *
- * 使用 'now' 优先级立即注入 SDK 并持久化。
+ * interrupt=true 时由适配器先取消当前 turn 再发送；否则按适配器队列语义追加。
  */
 export async function queueAgentMessage(
   input: AgentQueueMessageInput,

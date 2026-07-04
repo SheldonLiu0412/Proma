@@ -148,7 +148,7 @@ export function StorageSettings(): React.ReactElement {
     setLastResult(null)
     try {
       const result = await window.electronAPI.cleanupStorage({
-        categories: ['agent-sessions', 'sdk-config', 'workspaces'],
+        categories: ['agent-sessions', 'sdk-config', 'agent-sidecar', 'workspaces'],
         orphansOnly: true,
         archivedBeforeDays: 0,
       }) as CleanupResult
@@ -266,7 +266,7 @@ export function StorageSettings(): React.ReactElement {
             checked={autoCleanupTemp}
             onCheckedChange={handleAutoCleanupTempChange}
           />
-          <SettingsRow label="清理已归档会话数据" description="自动清理超过指定天数的已归档会话消息和 SDK 数据">
+          <SettingsRow label="清理已归档会话数据" description="自动清理超过指定天数的已归档会话消息、runtime 数据和文件快照">
             <Select value={String(autoCleanupDays)} onValueChange={handleAutoCleanupDaysChange}>
               <SelectTrigger className="w-28">
                 <SelectValue />
@@ -290,7 +290,7 @@ export function StorageSettings(): React.ReactElement {
         <SettingsCard>
           <SettingsRow
             label="孤儿数据"
-            description="删除会话后残留的消息文件、SDK 缓存和工作目录"
+            description="删除会话后残留的消息文件、runtime 缓存、文件快照和工作目录"
           >
             <div className="flex items-center gap-3">
               {hasOrphans && (

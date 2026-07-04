@@ -38,7 +38,7 @@ jobs:
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: 安装依赖
         run: bun install --frozen-lockfile
@@ -49,6 +49,14 @@ jobs:
           MAC_CERTS: ${{ secrets.MAC_CERTS }}
           MAC_CERTS_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
         run: |
+          set -euo pipefail
+
+          if [ -z "${MAC_CERTS:-}" ] || [ -z "${MAC_CERTS_PASSWORD:-}" ]; then
+            echo "未配置 macOS 签名证书，跳过证书导入并允许未签名构建"
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           # 创建临时 keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
@@ -70,6 +78,10 @@ jobs:
         run: bun run electron:build
         working-directory: .
 
+      - name: 同步运行时依赖
+        run: bun run sync:runtime-deps
+        working-directory: apps/electron
+
       # 打包并发布到 GitHub Releases
       - name: 打包并发布 (macOS)
         env:
@@ -79,7 +91,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           for i in 1 2 3; do
-            npx electron-builder --mac --arm64 --publish always && break
+            if npx electron-builder --mac --arm64 --publish always; then
+              exit 0
+            fi
+            if [ "$i" -eq 3 ]; then
+              echo "Attempt $i failed; no retries left."
+              exit 1
+            fi
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
@@ -101,7 +119,7 @@ jobs:
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: 安装依赖
         run: bun install --frozen-lockfile
@@ -112,6 +130,14 @@ jobs:
           MAC_CERTS: ${{ secrets.MAC_CERTS }}
           MAC_CERTS_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
         run: |
+          set -euo pipefail
+
+          if [ -z "${MAC_CERTS:-}" ] || [ -z "${MAC_CERTS_PASSWORD:-}" ]; then
+            echo "未配置 macOS 签名证书，跳过证书导入并允许未签名构建"
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           # 创建临时 keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
@@ -133,6 +159,10 @@ jobs:
         run: bun run electron:build
         working-directory: .
 
+      - name: 同步运行时依赖
+        run: bun run sync:runtime-deps
+        working-directory: apps/electron
+
       # 打包并发布到 GitHub Releases
       - name: 打包并发布 (macOS x64)
         env:
@@ -142,7 +172,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           for i in 1 2 3; do
-            npx electron-builder --mac --x64 --publish always && break
+            if npx electron-builder --mac --x64 --publish always; then
+              exit 0
+            fi
+            if [ "$i" -eq 3 ]; then
+              echo "Attempt $i failed; no retries left."
+              exit 1
+            fi
             echo "Attempt $i failed, retrying in 15s..."
             sleep 15
           done
@@ -300,7 +336,7 @@ jobs:
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: 安装依赖
         run: bun install --frozen-lockfile
@@ -309,6 +345,10 @@ jobs:
       - name: 构建 Electron 应用
         run: bun run electron:build
         working-directory: .
+
+      - name: 同步运行时依赖
+        run: bun run sync:runtime-deps
+        working-directory: apps/electron
 
       - name: 打包并发布 (Windows)
         env:

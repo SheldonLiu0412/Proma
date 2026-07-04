@@ -2220,9 +2220,38 @@ export function registerIpcHandlers(): void {
   // 中止 Agent 执行
   ipcMain.handle(
     AGENT_IPC_CHANNELS.STOP_AGENT,
-    async (_, sessionId: string): Promise<void> => {
+    async (event, sessionId: string): Promise<void> => {
+      const pendingPermissionRequests = permissionService.getPendingRequests()
+        .filter((request) => request.sessionId === sessionId)
+      const pendingAskUserRequests = askUserService.getPendingRequests()
+        .filter((request) => request.sessionId === sessionId)
+      const pendingExitPlanRequests = exitPlanService.getPendingRequests()
+        .filter((request) => request.sessionId === sessionId)
+
       feishuBridgeManager.stopSessionMirrorRun(sessionId)
       stopAgent(sessionId)
+      permissionService.clearSessionPending(sessionId)
+      askUserService.clearSessionPending(sessionId)
+      exitPlanService.clearSessionPending(sessionId)
+
+      for (const request of pendingPermissionRequests) {
+        event.sender.send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
+          sessionId,
+          payload: { kind: 'proma_event', event: { type: 'permission_resolved', requestId: request.requestId, behavior: 'deny' } },
+        })
+      }
+      for (const request of pendingAskUserRequests) {
+        event.sender.send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
+          sessionId,
+          payload: { kind: 'proma_event', event: { type: 'ask_user_resolved', requestId: request.requestId } },
+        })
+      }
+      for (const request of pendingExitPlanRequests) {
+        event.sender.send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
+          sessionId,
+          payload: { kind: 'proma_event', event: { type: 'exit_plan_mode_resolved', requestId: request.requestId } },
+        })
+      }
     }
   )
 
@@ -3079,12 +3108,16 @@ export function registerIpcHandlers(): void {
         throw new Error(`文件不存在: ${filePath}`)
       })
 
-      // 收集所有允许的路径：会话/工作区附加目录、附加文件 + 工作区文件目录
+      // 收集所有允许的路径：当前 session 目录、当前工作区文件目录、显式附加目录/文件。
       const allowedDirs: string[] = []
       const allowedFiles: string[] = []
+      let sessionWorkspaceSlug: string | undefined
 
       if (sessionId) {
         const meta = getAgentSessionMeta(sessionId)
+        if (meta?.workspaceId) {
+          sessionWorkspaceSlug = getAgentWorkspace(meta.workspaceId)?.slug
+        }
         if (meta?.attachedDirectories) {
           allowedDirs.push(...meta.attachedDirectories)
         }
@@ -3092,14 +3125,20 @@ export function registerIpcHandlers(): void {
           allowedFiles.push(...meta.attachedFiles)
         }
       }
-      if (workspaceSlug) {
-        allowedDirs.push(...getWorkspaceAttachedDirectories(workspaceSlug))
-        allowedFiles.push(...getWorkspaceAttachedFiles(workspaceSlug))
-        allowedDirs.push(getWorkspaceFilesDir(workspaceSlug))
+
+      if (workspaceSlug && sessionWorkspaceSlug && workspaceSlug !== sessionWorkspaceSlug) {
+        throw new Error('工作区与会话不匹配')
       }
 
-      // 还允许访问 agent-workspaces 根目录下的文件（session 文件等）
-      allowedDirs.push(getAgentWorkspacesDir())
+      const effectiveWorkspaceSlug = sessionWorkspaceSlug ?? workspaceSlug
+      if (sessionId && effectiveWorkspaceSlug) {
+        allowedDirs.push(getAgentSessionWorkspacePath(effectiveWorkspaceSlug, sessionId))
+      }
+      if (effectiveWorkspaceSlug) {
+        allowedDirs.push(...getWorkspaceAttachedDirectories(effectiveWorkspaceSlug))
+        allowedFiles.push(...getWorkspaceAttachedFiles(effectiveWorkspaceSlug))
+        allowedDirs.push(getWorkspaceFilesDir(effectiveWorkspaceSlug))
+      }
 
       const resolvedAllowedDirs = await Promise.all(
         allowedDirs.map((dir) => realpath(resolve(dir)).catch(() => resolve(dir)))
@@ -3963,7 +4002,7 @@ export function registerIpcHandlers(): void {
       const archiveDays = settings.autoCleanupArchivedDays ?? 0
       if (archiveDays > 0) {
         const result = await cleanupStorage({
-          categories: ['agent-sessions', 'sdk-config'],
+          categories: ['agent-sessions', 'sdk-config', 'agent-sidecar'],
           orphansOnly: false,
           archivedBeforeDays: archiveDays,
         })
@@ -4236,8 +4275,8 @@ export function registerIpcHandlers(): void {
   const isFiniteInt = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v)
   const validScheduleType = (v: unknown): v is 'interval' | 'daily' | 'weekly' | 'monthly' =>
     v === 'interval' || v === 'daily' || v === 'weekly' || v === 'monthly'
-  const validPermissionMode = (v: unknown): v is 'auto' | 'bypassPermissions' =>
-    v === 'auto' || v === 'bypassPermissions'
+  const validPermissionMode = (v: unknown): v is 'bypassPermissions' =>
+    v === 'bypassPermissions'
   const validAutomationNotificationTrigger = (v: unknown): v is 'always' | 'success' | 'error' =>
     v === 'always' || v === 'success' || v === 'error'
   const validTimeOfDay = (v: unknown): boolean => typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v)
