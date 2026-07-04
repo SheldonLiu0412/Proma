@@ -55,6 +55,40 @@ export type PermissionUpdate = {
 /** SDK PermissionDecisionClassification（匹配 SDK 0.2.120） */
 type PermissionDecisionClassification = 'user_temporary' | 'user_permanent' | 'user_reject'
 
+const READ_ONLY_TOOL_NAME_PREFIXES = [
+  'list_',
+  'get_',
+  'read_',
+  'fetch_',
+  'search_',
+  'query_',
+  'lookup_',
+  'history_',
+  'wait_',
+]
+
+const PROMA_DYNAMIC_READ_ONLY_MCP_TOOLS = new Set([
+  'mcp__feishu_chat__fetch_group_chat_history',
+])
+
+function isReadOnlyExternalToolName(toolName: string, knownReadOnlyToolNames?: ReadonlySet<string>): boolean {
+  if (knownReadOnlyToolNames?.has(toolName)) return true
+  if (PROMA_DYNAMIC_READ_ONLY_MCP_TOOLS.has(toolName)) return true
+  if (
+    toolName === 'TaskGet' ||
+    toolName === 'TaskList' ||
+    toolName === 'TodoRead' ||
+    toolName === 'ListMcpResourcesTool' ||
+    toolName === 'ReadMcpResourceTool' ||
+    toolName === 'ListMcpResourceTemplatesTool' ||
+    toolName === 'ListMcpPromptsTool' ||
+    toolName === 'GetMcpPromptTool'
+  ) return true
+  if (toolName.startsWith('mcp__')) return false
+  const normalized = toolName.toLowerCase()
+  return READ_ONLY_TOOL_NAME_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+}
+
 /** SDK PermissionResult（匹配 SDK 0.2.120） */
 export type PermissionResult = {
   behavior: 'allow'
@@ -122,6 +156,7 @@ export class AgentPermissionService {
     sendToRenderer: (request: PermissionRequest) => void,
     askUserHandler?: (sessionId: string, input: Record<string, unknown>, signal: AbortSignal, sendToRenderer: (request: AskUserRequest) => void) => Promise<PermissionResult>,
     sendAskUserToRenderer?: (request: AskUserRequest) => void,
+    knownReadOnlyToolNames?: ReadonlySet<string>,
   ): (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions) => Promise<PermissionResult> {
     return async (toolName, input, options) => {
       // AskUserQuestion 拦截：委托给交互式问答服务
@@ -142,7 +177,7 @@ export class AgentPermissionService {
       // auto 模式本地 classifier：只读工具（Read/Glob/Grep/WebSearch/WebFetch 及只读 Bash 命令）自动放行
       // 原因：CLI 的 --permission-prompt-tool stdio 会把每次 tool 调用都转发给 canUseTool，
       // SDK 的 auto classifier 对只读操作未必真的放行，这里做本地兜底避免用户被无意义的审批打扰
-      if (this.isReadOnlyTool(toolName, input)) return allow()
+      if (this.isReadOnlyTool(toolName, input, knownReadOnlyToolNames)) return allow()
 
       // 需要询问用户：构建请求并发送到 UI
       const request = this.buildPermissionRequest(sessionId, toolName, input, options)
@@ -218,9 +253,10 @@ export class AgentPermissionService {
   /**
    * 判断工具是否为只读操作（智能模式下自动允许）
    */
-  private isReadOnlyTool(toolName: string, input: Record<string, unknown>): boolean {
+  private isReadOnlyTool(toolName: string, input: Record<string, unknown>, knownReadOnlyToolNames?: ReadonlySet<string>): boolean {
     // 安全工具白名单
     if (SAFE_TOOLS.includes(toolName)) return true
+    if (isReadOnlyExternalToolName(toolName, knownReadOnlyToolNames)) return true
 
     // Bash 工具：检查命令是否匹配安全模式
     if (toolName === 'Bash') {
@@ -344,6 +380,10 @@ export class AgentPermissionService {
         return typeof input.file_path === 'string'
           ? `编辑文件: ${input.file_path}`
           : '编辑文件'
+      case 'MultiEdit':
+        return typeof input.file_path === 'string'
+          ? `批量编辑文件: ${input.file_path}`
+          : '批量编辑文件'
       case 'NotebookEdit':
         return typeof input.notebook_path === 'string'
           ? `编辑 Notebook: ${input.notebook_path}`
@@ -389,7 +429,7 @@ export class AgentPermissionService {
     }
 
     // 文件写入操作默认为 normal
-    if (['Write', 'Edit', 'NotebookEdit'].includes(toolName)) return 'normal'
+    if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(toolName)) return 'normal'
 
     // Task 工具默认为 normal
     if (toolName === 'Task') return 'normal'

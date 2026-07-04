@@ -1274,8 +1274,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
     // 上一条消息仍在处理中（streaming），或后台任务等待态（backgroundWaiting，通道仍开着）：
     // 都走注入通道而非新建 run，避免被服务端并发守卫拒绝。
-    // - streaming：本轮真正进行中，注入时需先软中断当前 turn
-    // - backgroundWaiting：软空闲、无活跃 turn，直接注入即可，无需中断
+    // - streaming：本轮真正进行中，注入前先中断当前 turn
+    // - backgroundWaiting：软空闲、无活跃 turn，直接注入即可
     if (streaming || backgroundWaiting) {
       // 流式追加时不处理附件（仅支持纯文本）
       if (pendingFilesSnapshot.length > 0) {
@@ -1348,7 +1348,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       })
 
       // 3. 异步发送到后端，注入消息作为新一轮输入。
-      //    - streaming（本轮真正进行中）：先软中断当前 turn 再注入
+      //    - streaming（本轮真正进行中）：先中断当前 turn 再注入
       //    - backgroundWaiting（软空闲，无活跃 turn）：直接注入，无需中断
       window.electronAPI.queueAgentMessage({
         sessionId,
@@ -1856,6 +1856,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         assistantMessageUuid: targetUuid,
       })
 
+      if (!result.conversationRewound) {
+        // 文件快照不可用时不截断对话（保持「对话与文件状态一致」）。
+        // 常见于启用 sidecar 快照之前创建的历史会话——这类会话缺少该轮的文件快照，无法安全回退。
+        const rewindErr = result.fileRewind?.error
+        const isMissingSnapshot = !rewindErr || /未找到.*快照|快照.*不存在|sidecar/i.test(rewindErr)
+        toast.warning('未回退对话', {
+          description: isMissingSnapshot
+            ? '该会话缺少此处的文件快照（通常是较早创建的历史会话），已保留当前会话不做改动。'
+            : `文件恢复不可用：${rewindErr}`,
+        })
+        return
+      }
+
       // 刷新消息列表
       store.set(agentMessageRefreshAtom, (prev) => {
         const map = new Map(prev)
@@ -1872,10 +1885,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         const fileCount = result.fileRewind.filesChanged?.length ?? 0
         toast.success('已回退到此处', {
           description: fileCount > 0 ? `${fileCount} 个文件已恢复` : '文件无变化',
-        })
-      } else if (result.fileRewind?.error) {
-        toast.warning('已回退对话', {
-          description: `文件恢复不可用：${result.fileRewind.error}`,
         })
       } else {
         toast.success('已回退到此处')

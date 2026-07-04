@@ -2319,7 +2319,7 @@ class FeishuBridge {
   }
 
   /**
-   * 创建飞书群聊 MCP 服务器（动态工具，仅在群聊 Agent 会话中注入）
+   * 创建飞书群聊动态工具（仅在群聊 Agent 会话中注入）
    *
    * 提供 `fetch_group_chat_history` 工具，让 Agent 可以主动拉取更多群聊历史。
    */
@@ -2327,54 +2327,48 @@ class FeishuBridge {
     chatId: string,
   ): Promise<Record<string, unknown> | null> {
     try {
-      const sdk = await import('@anthropic-ai/claude-agent-sdk')
-      const { z } = await import('zod')
+      const { defineTool } = await import('@earendil-works/pi-coding-agent')
+      const { Type } = await import('typebox')
 
-      const server = sdk.createSdkMcpServer({
-        name: 'feishu_chat',
-        version: '1.0.0',
-        tools: [
-          sdk.tool(
-            'fetch_group_chat_history',
-            '获取飞书群聊的历史消息。当你需要了解更多群聊上下文来完成任务时使用此工具。' +
-            '返回指定数量的历史消息，包含发送者、时间和内容。',
-            {
-              limit: z.number().min(1).max(50).optional()
-                .describe('要获取的消息数量（默认 20，最多 50）'),
-              before_timestamp: z.number().optional()
-                .describe('获取此时间戳（毫秒）之前的消息，用于向前翻页'),
-            },
-            async (args) => {
-              const messages = await this.fetchChatHistory(chatId, {
-                pageSize: args.limit,
-                beforeTimestamp: args.before_timestamp,
-              })
+      const tool = defineTool({
+        name: 'mcp__feishu_chat__fetch_group_chat_history',
+        label: '获取飞书群聊历史',
+        description: '获取飞书群聊的历史消息。当你需要了解更多群聊上下文来完成任务时使用此工具。返回指定数量的历史消息，包含发送者、时间和内容。',
+        promptSnippet: '获取飞书群聊的历史消息。',
+        parameters: Type.Object({
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+          before_timestamp: Type.Optional(Type.Number()),
+        }),
+        execute: async (_toolCallId, args) => {
+          const messages = await this.fetchChatHistory(chatId, {
+            pageSize: args.limit,
+            beforeTimestamp: args.before_timestamp,
+          })
 
-              if (messages.length === 0) {
-                return {
-                  content: [{ type: 'text' as const, text: '没有更多历史消息。' }],
-                }
-              }
+          if (messages.length === 0) {
+            return {
+              content: [{ type: 'text' as const, text: '没有更多历史消息。' }],
+              details: undefined,
+            }
+          }
 
-              const formatted = this.formatChatHistoryContext(messages)
-              const oldestTimestamp = messages[0]?.createTime ?? 0
+          const formatted = this.formatChatHistoryContext(messages)
+          const oldestTimestamp = messages[0]?.createTime ?? 0
 
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: `${formatted}\n\n（如需更早的消息，使用 before_timestamp: ${oldestTimestamp}）`,
-                }],
-              }
-            },
-            { annotations: { readOnlyHint: true } },
-          ),
-        ],
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `${formatted}\n\n（如需更早的消息，使用 before_timestamp: ${oldestTimestamp}）`,
+            }],
+            details: { oldestTimestamp },
+          }
+        },
       })
 
-      console.log('[飞书 Bridge] 已创建群聊 MCP 工具')
-      return server as unknown as Record<string, unknown>
+      console.log('[飞书 Bridge] 已创建群聊 Pi 工具')
+      return { __promaPiTools: [tool] } as unknown as Record<string, unknown>
     } catch (error) {
-      console.warn('[飞书 Bridge] 创建群聊 MCP 工具失败:', error)
+      console.warn('[飞书 Bridge] 创建群聊 Pi 工具失败:', error)
       return null
     }
   }

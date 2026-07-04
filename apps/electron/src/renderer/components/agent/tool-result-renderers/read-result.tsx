@@ -111,7 +111,7 @@ export function ReadResultRenderer({ result, isError, input }: ReadResultRendere
 
   const inputStartLine = getInputStartLine(input)
 
-  // Claude Agent SDK Read 工具返回带行号的内容（如 "    1\tcontent" / "1 content"）。
+  // Agent Read 工具返回带行号的内容（如 "    1\tcontent" / "1 content"）。
   // 渲染前剥离行号避免双行号，再用 unsafeCSS 把 Pierre gutter 调整回真实起始行。
   const renderCode = React.useCallback((text: string): React.ReactNode => {
     if (isError) {

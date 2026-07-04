@@ -9,6 +9,7 @@
 export const TOOL_REQUIRED_PARAMS: ReadonlyMap<string, ReadonlyArray<string>> = new Map([
   ['Write', ['file_path', 'content']],
   ['Edit', ['file_path', 'old_string', 'new_string']],
+  ['MultiEdit', ['file_path', 'edits']],
   ['Bash', ['command']],
   ['Read', ['file_path']],
   ['Glob', ['pattern']],
@@ -38,7 +39,7 @@ export function validateToolInput(
   const missing: string[] = []
   for (const param of requiredParams) {
     const value = input[param]
-    if (value === undefined || value === null || value === '') {
+    if (value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0)) {
       missing.push(param)
     }
   }

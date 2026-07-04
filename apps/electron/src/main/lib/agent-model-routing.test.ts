@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  applyAgentModelRoutingToEnv,
   DEEPSEEK_SUBAGENT_MODEL_ID,
   resolveAgentModelRouting,
 } from './agent-model-routing'
@@ -26,29 +25,22 @@ describe('Agent 辅助模型路由', () => {
     expect(policy.subagentModel).toBe(DEEPSEEK_SUBAGENT_MODEL_ID)
   })
 
-  test('Given 非 DeepSeek 模型 When 应用模型路由 Then 删除残留的 SubAgent 模型环境变量', () => {
-    const env: Record<string, string | undefined> = {
-      CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-v4-flash',
-    }
-
+  test('Given 非 DeepSeek 模型 When 解析模型路由 Then 不指定子任务模型', () => {
     const policy = resolveAgentModelRouting({
       modelId: 'claude-sonnet-4-6',
       provider: 'anthropic',
     })
-    applyAgentModelRoutingToEnv(env, policy)
 
     expect(policy.deepSeekFamily).toBe(false)
-    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
+    expect(policy.subagentModel).toBeUndefined()
   })
 
-  test('Given DeepSeek 模型 When 应用模型路由 Then 注入 SDK SubAgent 模型环境变量', () => {
-    const env: Record<string, string | undefined> = {}
-
-    applyAgentModelRoutingToEnv(env, resolveAgentModelRouting({
+  test('Given DeepSeek 模型 When 解析模型路由 Then 返回 Proma 子任务模型策略', () => {
+    const policy = resolveAgentModelRouting({
       modelId: 'deepseek-v4-flash',
       provider: 'deepseek',
-    }))
+    })
 
-    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe(DEEPSEEK_SUBAGENT_MODEL_ID)
+    expect(policy.subagentModel).toBe(DEEPSEEK_SUBAGENT_MODEL_ID)
   })
 })

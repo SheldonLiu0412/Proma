@@ -7,7 +7,7 @@
  * 纯数据逻辑，不耦合任何平台的消息呈现（卡片 / 纯文本由各 Bridge 自行拼装）。
  */
 
-import type { Channel, ChannelModel } from '@proma/shared'
+import { isAgentCompatibleProvider, type Channel, type ChannelModel } from '@proma/shared'
 import { listChannels, getChannelById } from './channel-manager'
 
 /** 取渠道下启用的模型 */
@@ -15,12 +15,17 @@ export function getEnabledModels(channel: Channel): ChannelModel[] {
   return channel.models.filter((m) => m.enabled)
 }
 
+/** 判断渠道是否可用于 Bridge 的 Agent 会话模型切换 */
+function isSwitchableChannel(channel: Channel): boolean {
+  return channel.enabled && isAgentCompatibleProvider(channel.provider) && getEnabledModels(channel).length > 0
+}
+
 /**
- * 列出「可切换」的渠道：已启用且至少有一个启用模型。
- * 过滤掉停用渠道和未配置（无可用模型）的渠道，避免用户切到用不了的渠道。
+ * 列出「可切换」的渠道：Agent 兼容、已启用且至少有一个启用模型。
+ * 过滤掉 Chat-only、停用渠道和未配置（无可用模型）的渠道，避免用户切到用不了的渠道。
  */
 export function listSwitchableChannels(): Channel[] {
-  return listChannels().filter((c) => c.enabled && getEnabledModels(c).length > 0)
+  return listChannels().filter(isSwitchableChannel)
 }
 
 /** 按 1 起始的序号解析可切换渠道，越界返回 undefined */

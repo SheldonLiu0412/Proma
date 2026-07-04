@@ -26,4 +26,19 @@ describe('Agent 工作区 MCP 配置', () => {
     expect(Object.keys(normalized.servers).sort()).toEqual(['github'])
     expect(normalized.servers.github?.command).toBe('github-mcp')
   })
+
+  test('Given stdio MCP 配置包含 cwd When 归一化配置 Then 保留工作目录', () => {
+    const normalized = normalizeWorkspaceMcpConfig({
+      servers: {
+        filesystem: {
+          type: 'stdio',
+          command: 'filesystem-mcp',
+          cwd: '/Users/jay/project-a',
+          enabled: true,
+        },
+      },
+    })
+
+    expect(normalized.servers.filesystem?.cwd).toBe('/Users/jay/project-a')
+  })
 })

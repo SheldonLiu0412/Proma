@@ -147,6 +147,7 @@ function createMentionSuggestion<T>(
 
 export interface SkillMentionItem {
   id: string
+  slug: string
   name: string
   description?: string
 }
@@ -166,9 +167,9 @@ export function createSkillMentionSuggestion(
         return caps.skills
           .filter((s) => s.enabled)
           .filter((s) => !q || s.name.toLowerCase().includes(q) || (s.slug ?? '').toLowerCase().includes(q))
-          .map((s) => ({ id: s.slug, name: s.name, description: s.description }))
+          .map((s) => ({ id: s.name, slug: s.slug, name: s.name, description: s.description }))
       },
-      keyExtractor: (item) => item.id,
+      keyExtractor: (item) => item.slug,
       renderItem: (item) => (
         <>
           <Sparkles className="size-3.5 text-violet-500 flex-shrink-0" />
@@ -178,7 +179,7 @@ export function createSkillMentionSuggestion(
           )}
         </>
       ),
-      toCommand: (item) => ({ id: item.id, label: item.name }),
+      toCommand: (item) => ({ id: item.name, label: item.name }),
     },
     workspaceSlugRef,
     mentionActiveRef,

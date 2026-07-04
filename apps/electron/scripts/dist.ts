@@ -4,16 +4,16 @@
  *
  * 功能：
  * - 分步执行打包流程，每步带计时和状态指示
- * - 支持只构建当前架构（--current-arch）加速开发测试
+ * - 支持显式构建当前架构（--current-arch）加速开发测试
  * - 支持详细输出模式（--verbose）查看 electron-builder 完整日志
  * - 支持跳过代码签名（--no-sign）
  * - 支持只构建 DMG 或 ZIP（--dmg / --zip）
  *
  * 使用：
- * bun run scripts/dist.ts                          # 完整打包（双架构 + DMG + ZIP）
- * bun run scripts/dist.ts --current-arch            # 只构建当前架构（快速）
- * bun run scripts/dist.ts --current-arch --verbose   # 当前架构 + 详细日志
- * bun run scripts/dist.ts --current-arch --dmg       # 当前架构 + 只构建 DMG
+ * bun run scripts/dist.ts                          # 默认架构 + DMG + ZIP
+ * bun run scripts/dist.ts --current-arch            # 显式构建当前架构（快速）
+ * bun run scripts/dist.ts --current-arch --verbose   # 显式当前架构 + 详细日志
+ * bun run scripts/dist.ts --current-arch --dmg       # 显式当前架构 + 只构建 DMG
  * bun run scripts/dist.ts --no-sign                 # 跳过代码签名
  */
 
@@ -161,13 +161,13 @@ function main(): void {
   // 打印配置信息
   console.log(`\n${color.bgBlue}${color.bold} Proma 打包工具 ${color.reset}\n`)
   console.log(`  ${color.bold}平台${color.reset}:     ${opts.platform}`)
-  console.log(`  ${color.bold}架构${color.reset}:     ${opts.currentArch ? arch + ' (仅当前)' : 'arm64 + x64'}`)
+  console.log(`  ${color.bold}架构${color.reset}:     ${opts.currentArch ? arch + ' (显式当前)' : 'electron-builder 默认'}`)
   console.log(`  ${color.bold}格式${color.reset}:     ${opts.targetFormat}`)
   console.log(`  ${color.bold}签名${color.reset}:     ${opts.noSign ? '跳过' : '启用'}`)
   console.log(`  ${color.bold}详细日志${color.reset}: ${opts.verbose ? '开启' : '关闭'}`)
   printSeparator()
 
-  const totalSteps = 6
+  const totalSteps = 7
   let step = 0
 
   // ── 步骤 1: 构建主进程 ──
@@ -214,13 +214,22 @@ function main(): void {
   )
   printStepResult(results[results.length - 1])
 
-  // ── 步骤 6: electron-builder 打包 ──
+  // ── 步骤 6: 同步 external runtime 依赖 ──
+  step++
+  printStepStart(step, totalSteps, '同步主进程运行时依赖')
+  results.push(
+    runStep('同步运行时依赖', 'bun', ['run', 'sync:runtime-deps'], { verbose: opts.verbose })
+  )
+  printStepResult(results[results.length - 1])
+  if (!results[results.length - 1].success) return printSummary(results)
+
+  // ── 步骤 7: electron-builder 打包 ──
   step++
   printStepStart(step, totalSteps, 'Electron Builder 打包')
 
   const builderArgs = ['electron-builder', `--${opts.platform}`]
 
-  // 只构建当前架构
+  // 显式只构建当前架构；默认不传 arch，沿用 electron-builder 当前行为。
   if (opts.currentArch) {
     builderArgs.push(`--${arch}`)
   }

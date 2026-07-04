@@ -115,4 +115,14 @@ describe('容错与渐进式读取原语', () => {
     expect(md).toContain('## 助手')
     expect(md).toContain('答案含关键词 needle')
   })
+
+  test('renderTranscriptMarkdown 转义工具摘要中的链接片段', () => {
+    const md = renderTranscriptMarkdown(
+      [{ index: 0, role: 'assistant', text: '', toolSummaries: ['Read](https://example.com) [x]'], preview: '', tokens: 0 }],
+      { header: false },
+    )
+
+    expect(md).toBe('## 助手\n\n> [工具: Read\\]\\(https://example.com\\) \\[x\\]]\n')
+    expect(md).not.toContain('Read](https://example.com)')
+  })
 })

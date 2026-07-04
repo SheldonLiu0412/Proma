@@ -42,6 +42,9 @@ import {
   agentSessionPathMapAtom,
   agentDiffRefreshVersionAtom,
   askUserDraftsAtom,
+  removePendingRequestById,
+  removePendingRequestsForSession,
+  upsertPendingRequestsById,
 } from '@/atoms/agent-atoms'
 import {
   notificationsEnabledAtom,
@@ -56,7 +59,7 @@ import { agentDiffUnseenChangesAtom, agentDiffUnseenFilesAtom } from '@/atoms/ag
 import { previewFileMapAtom } from '@/atoms/preview-atoms'
 import type { NotificationSoundType } from '@/types/settings'
 import { toast } from 'sonner'
-import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStreamPayload, SDKAssistantMessage, SDKUserMessage, SDKSystemMessage, SDKContentBlock, SDKUserContentBlock, PromaEvent, AgentSessionMeta } from '@proma/shared'
+import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStreamPayload, SDKAssistantMessage, SDKUserMessage, SDKSystemMessage, SDKContentBlock, SDKUserContentBlock, PromaEvent, AgentSessionMeta, AgentToolResultImage } from '@proma/shared'
 import { inferContextWindow } from '@proma/shared'
 import { buildExternalAgentRunActivation } from '@/lib/external-agent-run'
 import { upsertAgentSession, mergeFetchedAgentSessions } from '@/lib/agent-session-list'
@@ -96,6 +99,108 @@ function cyrb53(str: string): string {
 
 function uniqueTruthyPaths(paths: Array<string | null | undefined>): string[] {
   return Array.from(new Set(paths.filter((p): p is string => typeof p === 'string' && p.length > 0)))
+}
+
+function safeStringify(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    const serialized = JSON.stringify(value, null, 2)
+    return serialized ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function summarizeBinaryToolBlock(block: Record<string, unknown>): string | undefined {
+  if (block.type === 'image') {
+    const mimeType = typeof block.mimeType === 'string'
+      ? block.mimeType
+      : typeof block.mediaType === 'string'
+        ? block.mediaType
+        : 'image'
+    const dataLength = typeof block.data === 'string' ? block.data.length : 0
+    return `[图片结果: ${mimeType}${dataLength > 0 ? `, base64 ${dataLength} chars` : ''}]`
+  }
+  if (typeof block.blob === 'string') {
+    const mimeType = typeof block.mimeType === 'string' ? block.mimeType : 'binary'
+    return `[二进制结果: ${mimeType}, base64 ${block.blob.length} chars]`
+  }
+  return undefined
+}
+
+const PROMA_IMAGE_ATTACHMENT_RE = /\[PROMA_IMAGE_ATTACHMENT:([^\]]+)\]/g
+
+function isAgentToolResultImage(value: unknown): value is AgentToolResultImage {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.localPath === 'string'
+    && typeof record.filename === 'string'
+    && typeof record.mediaType === 'string'
+}
+
+function parsePromaImageAttachments(text: string): AgentToolResultImage[] {
+  const attachments: AgentToolResultImage[] = []
+  for (const match of text.matchAll(PROMA_IMAGE_ATTACHMENT_RE)) {
+    const raw = match[1]
+    if (!raw) continue
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (isAgentToolResultImage(parsed)) {
+        attachments.push(parsed)
+      }
+    } catch {
+      // 图片附件标记损坏时忽略，原始文本仍会保留在 result 中。
+    }
+  }
+  return attachments
+}
+
+function dedupeImageAttachments(attachments: AgentToolResultImage[]): AgentToolResultImage[] {
+  const seen = new Set<string>()
+  const unique: AgentToolResultImage[] = []
+  for (const attachment of attachments) {
+    const key = `${attachment.localPath}|${attachment.filename}|${attachment.mediaType}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(attachment)
+  }
+  return unique
+}
+
+function extractToolResultImageAttachments(content: unknown): AgentToolResultImage[] {
+  if (typeof content === 'string') return dedupeImageAttachments(parsePromaImageAttachments(content))
+  if (!Array.isArray(content)) return []
+
+  const attachments: AgentToolResultImage[] = []
+  for (const item of content) {
+    if (!item || typeof item !== 'object') continue
+    const block = item as Record<string, unknown>
+    if (typeof block.text === 'string') {
+      attachments.push(...parsePromaImageAttachments(block.text))
+    }
+  }
+  return dedupeImageAttachments(attachments)
+}
+
+function formatToolResultBlock(block: Record<string, unknown>): string {
+  if (block.type === 'text' && typeof block.text === 'string') return block.text
+  if (typeof block.text === 'string') return block.text
+  return summarizeBinaryToolBlock(block) ?? safeStringify(block)
+}
+
+function formatToolResultContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    const parts = content.map((item) => {
+      if (!item || typeof item !== 'object') return safeStringify(item)
+      return formatToolResultBlock(item as Record<string, unknown>)
+    }).filter(Boolean)
+    return parts.join('\n')
+  }
+  if (content && typeof content === 'object') {
+    return formatToolResultBlock(content as Record<string, unknown>)
+  }
+  return content == null ? '' : safeStringify(content)
 }
 
 // ============================================================================
@@ -223,13 +328,15 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
       for (const block of contentBlocks) {
         if (block.type === 'tool_result') {
           const tb = block as SDKUserContentBlock & { tool_use_id: string; content?: unknown; is_error?: boolean }
-          const resultStr = typeof tb.content === 'string' ? tb.content : (tb.content != null ? JSON.stringify(tb.content) : '')
+          const resultStr = formatToolResultContent(tb.content)
+          const imageAttachments = extractToolResultImageAttachments(tb.content)
           events.push({
             type: 'tool_result',
             toolUseId: tb.tool_use_id,
             result: resultStr,
             isError: tb.is_error ?? false,
             parentToolUseId: uMsg.parent_tool_use_id ?? undefined,
+            ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
           })
         }
       }
@@ -463,6 +570,34 @@ export function useGlobalAgentListeners(): void {
 
     const workspaceFilesPathCache = new Map<string, string>()
 
+    const clearAskUserDrafts = (requestIds: readonly string[]): void => {
+      if (requestIds.length === 0) return
+      store.set(askUserDraftsAtom, (prev) => {
+        let changed = false
+        const map = new Map(prev)
+        for (const requestId of requestIds) {
+          if (map.delete(requestId)) changed = true
+        }
+        return changed ? map : prev
+      })
+    }
+
+    const clearPendingRequestsForSession = (sid: string): void => {
+      const askUserRequestIds = (store.get(allPendingAskUserRequestsAtom).get(sid) ?? [])
+        .map((request) => request.requestId)
+
+      store.set(allPendingPermissionRequestsAtom, (prev) =>
+        removePendingRequestsForSession(prev, sid)
+      )
+      store.set(allPendingAskUserRequestsAtom, (prev) =>
+        removePendingRequestsForSession(prev, sid)
+      )
+      store.set(allPendingExitPlanRequestsAtom, (prev) =>
+        removePendingRequestsForSession(prev, sid)
+      )
+      clearAskUserDrafts(askUserRequestIds)
+    }
+
     const getWorkspaceIdForSession = (sid: string): string | null => {
       const session = store.get(agentSessionsAtom).find((s) => s.id === sid)
       return session?.workspaceId ?? store.get(currentAgentWorkspaceIdAtom)
@@ -552,7 +687,9 @@ export function useGlobalAgentListeners(): void {
     }
 
     // ===== 0. 初始化：从持久化 meta 恢复 stoppedByUser 状态 =====
+    let disposed = false
     window.electronAPI.listAgentSessions().then((sessions) => {
+      if (disposed) return
       const stoppedIds = new Set<string>(
         sessions.filter((s) => s.stoppedByUser).map((s) => s.id)
       )
@@ -560,6 +697,38 @@ export function useGlobalAgentListeners(): void {
         store.set(stoppedByUserSessionsAtom, stoppedIds)
       }
     }).catch(console.error)
+
+    // HMR / 窗口重建后，从主进程恢复仍在等待用户交互的 pending 请求。
+    window.electronAPI.getPendingRequests()
+      .then((snapshot) => {
+        if (disposed) return
+        unstable_batchedUpdates(() => {
+          store.set(allPendingPermissionRequestsAtom, (prev) =>
+            upsertPendingRequestsById(prev, snapshot.permissions)
+          )
+          store.set(allPendingAskUserRequestsAtom, (prev) =>
+            upsertPendingRequestsById(prev, snapshot.askUsers)
+          )
+          store.set(allPendingExitPlanRequestsAtom, (prev) =>
+            upsertPendingRequestsById(prev, snapshot.exitPlans)
+          )
+
+          const exitPlanSessionIds = new Set(snapshot.exitPlans.map((request) => request.sessionId))
+          if (exitPlanSessionIds.size > 0) {
+            store.set(agentPlanModeSessionsAtom, (prev: Set<string>) => {
+              let changed = false
+              const next = new Set(prev)
+              for (const pendingSessionId of exitPlanSessionIds) {
+                if (next.delete(pendingSessionId)) changed = true
+              }
+              return changed ? next : prev
+            })
+          }
+        })
+      })
+      .catch((error) => {
+        console.error('[GlobalAgentListeners] 恢复待处理请求失败:', error)
+      })
 
     // ===== 1. 流式事件 =====
     // [FLASH-DEBUG] 事件频率计数器
@@ -608,6 +777,14 @@ export function useGlobalAgentListeners(): void {
             // 跳过写入 liveMessages
           } else if (msgRecord.type === 'system' && msgRecord.subtype === 'thinking_tokens') {
             // thinking_tokens 是高频进度估算，只更新流式状态，不进入消息转录。
+          } else if (msgRecord.type === 'system' && msgRecord.subtype === 'compacting') {
+            // compacting 只是压缩进行中的瞬时信号：通过 legacyEvents 驱动 isCompacting flag（尾部
+            // CompactingIndicator），不能进入 liveMessages 转录，否则会与 flag 驱动的指示器重复渲染成两个。
+            // 压缩完成的 compact_boundary 仍会正常进入转录，显示「上下文已压缩」分界线。
+          } else if (msgRecord.type === 'system' && msgRecord.subtype === 'compact_noop') {
+            // 「会话太小无需压缩」/「已压缩」是良性结果：用 toast 轻量提示，不写入对话转录。
+            const noopMsg = typeof msgRecord.message === 'string' ? msgRecord.message : '当前上下文暂时无需压缩。'
+            toast.info(noopMsg, { duration: 5000 })
           } else if (!msgRecord.isReplay) {
             // 为实时消息补充 _createdAt 时间戳（与持久化时的逻辑一致），
             // 避免 AssistantTurnRenderer 因缺少时间戳导致 header 时间消失
@@ -622,17 +799,31 @@ export function useGlobalAgentListeners(): void {
               msgRecord._channelModelId = sessionModelMap.get(sessionId) ?? defaultModelId ?? undefined
             }
 
-            store.set(liveMessagesMapAtom, (prev) => {
-              const map = new Map(prev)
-              const current = map.get(sessionId) ?? []
+	            store.set(liveMessagesMapAtom, (prev) => {
+	              const map = new Map(prev)
+	              const current = map.get(sessionId) ?? []
 
-              // UUID 去重：队列消息已被乐观注入，SDK 再次推送时跳过
-              const incomingUuid = msgRecord.uuid as string | undefined
-              if (incomingUuid && current.some((m) => (m as Record<string, unknown>).uuid === incomingUuid)) {
-                return prev
-              }
+	              // UUID 去重 / partial upsert：
+	              // - 队列用户消息已被乐观注入，SDK 再次推送时跳过
+	              // - Pi message_update 使用稳定 uuid 标记 _partial；最终 message_end 用同一 uuid 替换
+	              const incomingUuid = msgRecord.uuid as string | undefined
+	              if (incomingUuid) {
+	                const existingIndex = current.findIndex((m) => (m as Record<string, unknown>).uuid === incomingUuid)
+	                if (existingIndex >= 0) {
+	                  const existing = current[existingIndex] as Record<string, unknown>
+	                  const incomingIsPartial = msgRecord._partial === true
+	                  const existingIsPartial = existing._partial === true
+	                  if (incomingIsPartial || existingIsPartial) {
+	                    const next = [...current]
+	                    next[existingIndex] = payload.message
+	                    map.set(sessionId, next)
+	                    return map
+	                  }
+	                  return prev
+	                }
+	              }
 
-              map.set(sessionId, [...current, payload.message])
+	              map.set(sessionId, [...current, payload.message])
               return map
             })
           }
@@ -794,12 +985,9 @@ export function useGlobalAgentListeners(): void {
             })
           } else if (event.type === 'permission_request') {
             // 权限请求入队（统一通道，不区分当前/后台会话）
-            store.set(allPendingPermissionRequestsAtom, (prev) => {
-              const map = new Map(prev)
-              const current = map.get(sessionId) ?? []
-              map.set(sessionId, [...current, event.request])
-              return map
-            })
+            store.set(allPendingPermissionRequestsAtom, (prev) =>
+              upsertPendingRequestsById(prev, [event.request])
+            )
             // 桌面通知（带提示音 + 会话导航）
             sendBlockingNotification(
               sessionId,
@@ -809,14 +997,16 @@ export function useGlobalAgentListeners(): void {
                 : 'Agent 需要你的权限确认',
               'permissionRequest'
             )
+          } else if (event.type === 'permission_resolved') {
+            // 权限可能由协作父会话代答，收到 resolved 后清理所有会话中的残留请求
+            store.set(allPendingPermissionRequestsAtom, (prev) =>
+              removePendingRequestById(prev, event.requestId)
+            )
           } else if (event.type === 'ask_user_request') {
             // AskUser 请求入队（统一通道，不区分当前/后台会话）
-            store.set(allPendingAskUserRequestsAtom, (prev) => {
-              const map = new Map(prev)
-              const current = map.get(sessionId) ?? []
-              map.set(sessionId, [...current, event.request])
-              return map
-            })
+            store.set(allPendingAskUserRequestsAtom, (prev) =>
+              upsertPendingRequestsById(prev, [event.request])
+            )
             // 桌面通知（带提示音 + 会话导航）
             sendBlockingNotification(
               sessionId,
@@ -826,17 +1016,9 @@ export function useGlobalAgentListeners(): void {
             )
           } else if (event.type === 'ask_user_resolved') {
             // AskUser 可能由协作父会话代答，收到 resolved 后清理所有会话中的残留请求和草稿
-            store.set(allPendingAskUserRequestsAtom, (prev) => {
-              let changed = false
-              const map = new Map(prev)
-              prev.forEach((requests, pendingSessionId) => {
-                const nextRequests = requests.filter((request) => request.requestId !== event.requestId)
-                if (nextRequests.length !== requests.length) changed = true
-                if (nextRequests.length === 0) map.delete(pendingSessionId)
-                else map.set(pendingSessionId, nextRequests)
-              })
-              return changed ? map : prev
-            })
+            store.set(allPendingAskUserRequestsAtom, (prev) =>
+              removePendingRequestById(prev, event.requestId)
+            )
             store.set(askUserDraftsAtom, (prev) => {
               if (!prev.has(event.requestId)) return prev
               const map = new Map(prev)
@@ -845,12 +1027,9 @@ export function useGlobalAgentListeners(): void {
             })
           } else if (event.type === 'exit_plan_mode_request') {
             // ExitPlanMode 请求入队
-            store.set(allPendingExitPlanRequestsAtom, (prev) => {
-              const map = new Map(prev)
-              const current = map.get(sessionId) ?? []
-              map.set(sessionId, [...current, event.request])
-              return map
-            })
+            store.set(allPendingExitPlanRequestsAtom, (prev) =>
+              upsertPendingRequestsById(prev, [event.request])
+            )
             // 退出 Plan 模式指示状态
             store.set(agentPlanModeSessionsAtom, (prev: Set<string>) => {
               if (!prev.has(sessionId)) return prev
@@ -864,6 +1043,10 @@ export function useGlobalAgentListeners(): void {
               'Agent 计划待审批',
               'Agent 已完成计划，等待你的审批',
               'exitPlanMode'
+            )
+          } else if (event.type === 'exit_plan_mode_resolved') {
+            store.set(allPendingExitPlanRequestsAtom, (prev) =>
+              removePendingRequestById(prev, event.requestId)
             )
           } else if (event.type === 'enter_plan_mode') {
             // 进入 Plan 模式
@@ -988,6 +1171,7 @@ export function useGlobalAgentListeners(): void {
             error_max_turns: '任务被中断：已达到轮次上限。继续对话可让 Agent 接着完成。',
             error_max_budget_usd: '任务被中断：已达到预算上限。',
             error_during_execution: '任务执行过程中发生错误。',
+            max_tokens: '任务被中断：模型输出达到长度上限。继续对话可让 Agent 接着完成。',
           }
           // error_during_execution 等执行期错误：优先展示 SDK result.errors[] 携带的真实原因，
           // 让用户能据此判断重试 / 改提问 / 报 bug，而非只看到泛泛的兜底文案。
@@ -1029,6 +1213,8 @@ export function useGlobalAgentListeners(): void {
           // 后台任务等待态：保留后台任务列表（面板继续显示在跑任务），不做收尾清理，
           // 等任务完成 Agent 自动唤醒续轮后再走真正的完成路径。
           if (backgroundTasksPending) return
+
+          clearPendingRequestsForSession(data.sessionId)
 
           // 清理后台任务
           store.set(backgroundTasksAtomFamily(data.sessionId), [])
@@ -1080,6 +1266,8 @@ export function useGlobalAgentListeners(): void {
       (data: { sessionId: string; error: string }) => {
         unstable_batchedUpdates(() => {
         console.error('[GlobalAgentListeners] 流式错误:', data.error)
+
+        clearPendingRequestsForSession(data.sessionId)
 
         // 存储错误消息
         store.set(agentStreamErrorsAtom, (prev) => {
@@ -1203,6 +1391,7 @@ export function useGlobalAgentListeners(): void {
     window.addEventListener('focus', onWindowFocus)
 
     return () => {
+      disposed = true
       cleanupEvent()
       cleanupComplete()
       cleanupError()

@@ -640,8 +640,8 @@ export function getAgentSessionWorkspacePath(workspaceSlug: string, sessionId: s
 /**
  * 获取 SDK 隔离配置目录路径
  *
- * 用于设置 CLAUDE_CONFIG_DIR 环境变量，让 SDK 读取独立的配置文件，
- * 而不是用户的 ~/.claude.json，实现 Proma 与 Claude Code CLI 的配置隔离。
+ * 用于存放 Proma 管理的 Agent runtime 配置和 Pi session 文件，
+ * 与用户在终端里直接使用的其它 Agent 配置保持隔离。
  *
  * 如果目录不存在则自动创建。
  *
@@ -653,6 +653,41 @@ export function getSdkConfigDir(): string {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
     console.log(`[配置] 已创建 SDK 配置目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取 Proma Agent sidecar 数据目录路径
+ *
+ * 用于存放 Proma 自有的文件快照等 runtime 辅助数据，独立于 Pi session 目录，
+ * 方便后续统计、清理和迁移。
+ *
+ * @returns ~/.proma/agent-sidecar/
+ */
+export function getAgentSidecarDir(): string {
+  const dir = join(getConfigDir(), 'agent-sidecar')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建 Agent sidecar 目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取 Proma Agent sidecar 快照目录路径
+ *
+ * @returns ~/.proma/agent-sidecar/snapshots/
+ */
+export function getAgentSidecarSnapshotsDir(): string {
+  const dir = join(getAgentSidecarDir(), 'snapshots')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建 Agent sidecar 快照目录: ${dir}`)
   }
 
   return dir

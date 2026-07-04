@@ -400,6 +400,59 @@ export const agentMaxTurnsAtom = atom<number | undefined>(undefined)
 /** 待处理的权限请求 Map — 以 sessionId 为 key，切换会话时保留状态 */
 export const allPendingPermissionRequestsAtom = atom<Map<string, readonly PermissionRequest[]>>(new Map())
 
+interface PendingRequestWithId {
+  requestId: string
+}
+
+interface PendingRequestWithSession extends PendingRequestWithId {
+  sessionId: string
+}
+
+/** 按 requestId 清理所有会话队列里的 pending 请求 */
+export function removePendingRequestById<T extends PendingRequestWithId>(
+  prev: Map<string, readonly T[]>,
+  requestId: string,
+): Map<string, readonly T[]> {
+  let changed = false
+  const map = new Map(prev)
+  prev.forEach((requests, pendingSessionId) => {
+    const nextRequests = requests.filter((request) => request.requestId !== requestId)
+    if (nextRequests.length !== requests.length) changed = true
+    if (nextRequests.length === 0) map.delete(pendingSessionId)
+    else map.set(pendingSessionId, nextRequests)
+  })
+  return changed ? map : prev
+}
+
+/** 按 requestId 去重合并 pending 请求，保留原 sessionId 分组 */
+export function upsertPendingRequestsById<T extends PendingRequestWithSession>(
+  prev: Map<string, readonly T[]>,
+  requests: readonly T[],
+): Map<string, readonly T[]> {
+  let changed = false
+  const map = new Map(prev)
+
+  for (const request of requests) {
+    const current = map.get(request.sessionId) ?? []
+    if (current.some((item) => item.requestId === request.requestId)) continue
+    map.set(request.sessionId, [...current, request])
+    changed = true
+  }
+
+  return changed ? map : prev
+}
+
+/** 清理单个 session 下所有 pending 请求 */
+export function removePendingRequestsForSession<T>(
+  prev: Map<string, readonly T[]>,
+  sessionId: string,
+): Map<string, readonly T[]> {
+  if (!prev.has(sessionId)) return prev
+  const map = new Map(prev)
+  map.delete(sessionId)
+  return map
+}
+
 type PermissionRequestsUpdate = readonly PermissionRequest[] | ((prev: readonly PermissionRequest[]) => readonly PermissionRequest[])
 
 /** 当前会话的权限请求队列（派生读写原子） */

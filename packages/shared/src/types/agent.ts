@@ -20,13 +20,13 @@ export interface AgentWorkspace {
   updatedAt: number
 }
 
-// ===== SDK 新增类型声明（0.2.52 ~ 0.2.63） =====
+// ===== Agent runtime 兼容类型声明 =====
 
 /**
  * 思考模式配置
  *
- * 控制 Claude 的推理/思考行为：
- * - adaptive: Claude 自行决定何时以及思考多少（Opus 4.6+ 默认）
+ * 控制模型的推理/思考行为：
+ * - adaptive: 由模型自行决定何时以及思考多少
  * - enabled: 固定思考 Token 预算（旧模型）
  * - disabled: 不使用扩展思考
  */
@@ -49,7 +49,7 @@ export type AgentEffort = 'low' | 'medium' | 'high' | 'max'
 /**
  * 自定义子代理定义
  *
- * 通过 SDK 的 agents 选项注册可被 Agent 工具调用的自定义子代理。
+ * 通过 Agent runtime 的 agents 选项注册可被 Agent 工具调用的自定义子代理。
  */
 export interface AgentDefinition {
   /** 自然语言描述，说明何时使用该代理 */
@@ -67,9 +67,9 @@ export interface AgentDefinition {
 }
 
 /**
- * SDK 会话信息（listSessions 返回）
+ * Agent runtime 会话信息（listSessions 返回）
  *
- * SDK 0.2.53 新增，用于发现和列出历史会话。
+ * 用于发现和列出历史 runtime 会话。
  */
 export interface SDKSessionInfo {
   /** 会话 ID */
@@ -87,9 +87,9 @@ export interface SDKSessionInfo {
 }
 
 /**
- * SDK 会话消息（getSessionMessages 返回）
+ * Agent runtime 会话消息（getSessionMessages 返回）
  *
- * SDK 0.2.59 新增，用于读取会话的完整对话历史。
+ * 用于读取 runtime 会话的完整对话历史。
  */
 export interface SDKSessionMessage {
   /** 消息类型（SDK 原始类型标识） */
@@ -176,7 +176,7 @@ export interface SDKAssistantMessage {
   }
   parent_tool_use_id: string | null
   session_id?: string
-  /** SDK 消息唯一标识，用于 forkSession / resumeSessionAt */
+  /** SDK 消息唯一标识，用于 Proma fork / rewind */
   uuid?: string
   error?: { message: string; errorType?: string }
   isReplay?: boolean
@@ -244,7 +244,7 @@ export interface SDKSystemMessage {
   [key: string]: unknown
 }
 
-/** SDK thinking token 估算消息（Claude Agent SDK 0.3.156+） */
+/** runtime thinking token 估算消息 */
 export interface SDKThinkingTokensMessage {
   type: 'system'
   subtype: 'thinking_tokens'
@@ -267,7 +267,7 @@ export interface SDKBackgroundTaskSummary {
   name?: string
 }
 
-/** SDK 会话级定时任务摘要（result / hook 中可能出现） */
+/** runtime 会话级定时任务摘要（result / hook 中可能出现） */
 export interface SDKSessionCronSummary {
   id: string
   schedule: string
@@ -342,7 +342,7 @@ export type ErrorCode =
   | 'windows_shell_missing'
   | 'channel_not_found'
   | 'api_key_decrypt_failed'
-  | 'claude_binary_not_found'
+  | 'agent_runtime_not_found'
   | 'session_busy'
   | 'unknown_error'
 
@@ -563,6 +563,8 @@ export interface AgentSessionMeta {
   modelId?: string
   /** SDK 内部会话 ID（用于 resume 衔接上下文） */
   sdkSessionId?: string
+  /** 迁移前旧 runtime 的 SDK 会话 ID，仅用于历史数据保护和清理引用 */
+  legacySdkSessionId?: string
   /** 所属工作区 ID */
   workspaceId?: string
   /** 是否置顶 */
@@ -573,11 +575,13 @@ export interface AgentSessionMeta {
   attachedDirectories?: string[]
   /** 附加的外部文件路径列表（绝对路径，发送时以父目录作为 SDK additionalDirectories） */
   attachedFiles?: string[]
-  /** 分叉来源：源会话的 Proma 工作目录（SDK session 文件在此目录的项目空间中，首次 resume 后清除） */
+  /** 分叉来源：源会话的 Proma 工作目录 */
   forkSourceDir?: string
-  /** 分叉来源：源会话的 SDK session ID（用于 rewind 时读取源会话的 file-history-snapshot 和备份文件） */
+  /** 分叉来源：源 Proma 会话 ID，用于从源 sidecar 读取历史文件快照 */
+  forkSourceSessionId?: string
+  /** 历史兼容字段：旧 runtime 的源会话 SDK session ID */
   forkSourceSdkSessionId?: string
-  /** 回退后的 resume 截断点：下次发消息时传给 SDK resumeSessionAt（消费后清除） */
+  /** 历史兼容字段：旧 runtime 的回退 resume 截断点 */
   resumeAtMessageUuid?: string
   /** 历史兼容字段：旧版手动保留状态 */
   manualWorking?: boolean
@@ -742,6 +746,8 @@ export interface McpServerEntry {
   args?: string[]
   /** stdio: 环境变量 */
   env?: Record<string, string>
+  /** stdio: 工作目录 */
+  cwd?: string
   /** http/sse: 服务端 URL */
   url?: string
   /** http/sse: 请求头 */
@@ -864,7 +870,7 @@ export interface WorkspaceMemoryFileSummary {
 export interface WorkspaceMemorySummary {
   /** 工作区级 CLAUDE.md */
   claudeMd: WorkspaceMemoryFileSummary
-  /** SDK auto memory 目录 */
+  /** auto memory 目录 */
   autoMemory: {
     /** 绝对目录路径 */
     directory: string
@@ -909,7 +915,7 @@ export interface AgentSendInput {
   customMcpServers?: Record<string, Record<string, unknown>>
   /** 强制覆盖权限模式（飞书等无 UI 交互场景下强制 'bypassPermissions'） */
   permissionModeOverride?: PromaPermissionMode
-  /** 用户通过 /skill:xxx 引用的 Skill slug 列表 */
+  /** 用户通过 /skill:xxx 引用的 Skill name 列表（兼容历史 slug） */
   mentionedSkills?: string[]
   /** 用户通过 #mcp:xxx 引用的 MCP 服务器名称列表 */
   mentionedMcpServers?: string[]
@@ -936,12 +942,12 @@ export interface AgentQueueMessageInput {
   /** 前端预生成的 UUID（用于乐观更新去重） */
   uuid?: string
   /**
-   * 软中断当前 Agent turn 后再追加消息。
-   * true：先调用 SDK query.interrupt() 立即打断正在输出的 turn，再注入消息。
-   * false / undefined：排队追加（默认行为，turn 结束后才会被消费）。
+   * 中断当前 Agent turn 后再追加消息。
+   * true：由底层适配器取消当前 turn，再把消息作为新一轮用户输入发送。
+   * false / undefined：排队追加（默认行为，由适配器决定 steer/follow-up 语义）。
    */
   interrupt?: boolean
-  /** 用户通过 /skill:xxx 引用的 Skill slug 列表 */
+  /** 用户通过 /skill:xxx 引用的 Skill name 列表（兼容历史 slug） */
   mentionedSkills?: string[]
   /** 用户通过 #mcp:xxx 引用的 MCP 服务器名称列表 */
   mentionedMcpServers?: string[]
@@ -981,9 +987,11 @@ export interface RewindSessionInput {
 
 /** 快照回退结果 */
 export interface RewindSessionResult {
+  /** 对话 JSONL 是否已经截断。文件恢复失败时为 false，避免 UI 误报已回退。 */
+  conversationRewound: boolean
   /** 截断后剩余的消息数 */
   remainingMessages: number
-  /** 文件恢复结果（enableFileCheckpointing 启用时可用） */
+  /** 文件恢复结果（Proma sidecar 快照可用时返回） */
   fileRewind?: {
     canRewind: boolean
     error?: string
@@ -1271,7 +1279,7 @@ export type PromaPermissionMode = typeof PROMA_PERMISSION_MODES[number]
 export const PROMA_DEFAULT_PERMISSION_MODE: PromaPermissionMode = 'bypassPermissions'
 
 export interface PromaPermissionModeConfig {
-  /** 对应 Claude Agent SDK 的 permissionMode */
+  /** Proma 产品层权限模式 */
   sdkMode: PromaPermissionMode
   label: string
   description: string
@@ -1338,7 +1346,7 @@ export interface PermissionRequest {
   sdkDisplayName?: string
   /** SDK 提供的操作标题，如 "Write to /path/to/file.ts" */
   sdkTitle?: string
-  /** SDK 提供的详细描述，如 "Claude wants to write 200 lines to /path/to/file.ts" */
+  /** SDK 提供的详细描述 */
   sdkDescription?: string
 }
 

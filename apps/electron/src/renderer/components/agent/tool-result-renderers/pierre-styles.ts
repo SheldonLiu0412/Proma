@@ -101,7 +101,7 @@ export const PIERRE_FILE_CSS = `
 /**
  * 为 Read 工具的 partial read 修正 PierreFile 行号。
  *
- * Claude SDK 的 Read 结果常带 cat -n 行号；渲染前会剥离这些前缀以避免双行号，
+ * Agent Read 结果常带 cat -n 行号；渲染前会剥离这些前缀以避免双行号，
  * 这里再把 Pierre 的 gutter 起始值调整回真实文件行号。
  */
 export function createPierreFileCSS(lineNumberStart: number, maxLineNumber: number): string {

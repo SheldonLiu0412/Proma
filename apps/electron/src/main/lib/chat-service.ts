@@ -24,7 +24,7 @@ import {
 import type { ImageAttachmentData, ContinuationMessage } from '@proma/core'
 import { listChannels, decryptApiKey } from './channel-manager'
 import { appendMessage, updateConversationMeta, getConversationMessages } from './conversation-manager'
-import { readAttachmentAsBase64, isImageAttachment } from './attachment-service'
+import { readImageAttachmentAsBase64, isImageAttachment } from './attachment-service'
 import { extractTextFromAttachment, isDocumentAttachment } from './document-parser'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
@@ -52,7 +52,7 @@ function getImageAttachmentData(attachments?: FileAttachment[]): ImageAttachment
     .filter((att) => isImageAttachment(att.mediaType))
     .map((att) => ({
       mediaType: att.mediaType,
-      data: readAttachmentAsBase64(att.localPath),
+      data: readImageAttachmentAsBase64(att),
     }))
 }
 

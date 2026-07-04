@@ -55,7 +55,7 @@ import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/l
 import { userProfileAtom } from '@/atoms/user-profile'
 import { channelsAtom, modelSelectorOpenAtom } from '@/atoms/chat-atoms'
 import { agentProcessGroupsKeepExpandedAtom, agentSessionPendingFilesAtom } from '@/atoms/agent-atoms'
-import { agentSessionsAtom } from '@/atoms/agent-atoms'
+import { agentSessionsAtom, agentWorkspacesAtom } from '@/atoms/agent-atoms'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { automationsAtom, automationFormAtom, automationToDraft } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
@@ -97,6 +97,15 @@ export interface SDKMessageRendererProps {
   showHeader?: boolean
   /** 用户在前端选择的模型 ID（优先用于显示名称） */
   sessionModelId?: string
+}
+
+interface SDKMessageSessionRecord {
+  session_id?: unknown
+}
+
+function getMessageSessionId(message: SDKMessage): string | null {
+  const sessionId = (message as SDKMessageSessionRecord).session_id
+  return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : null
 }
 
 // ===== system 消息：上下文压缩分割线 =====
@@ -549,9 +558,8 @@ export function AssistantTurnRenderer({ turn, allMessages, historicalTaskSubject
           .map((b) => (b as { text: string }).text)
           .join('\n\n')
         // 仅取主线 assistant 消息的 uuid 作为 fork/rewind 截断点。
-        // SDK forkSession 内部会过滤掉 sidechain（parent_tool_use_id 非空的子代理消息），
-        // 若把子代理 uuid 传过去会触发 "Message <uuid> not found in session" 错误。
-        const mainlineAssistants = turn.assistantMessages.filter((m) => !m.parent_tool_use_id)
+        // 子代理消息属于 sidechain（parent_tool_use_id 非空），不能作为 Proma 截断锚点。
+        const mainlineAssistants = turn.assistantMessages.filter((m) => !m.parent_tool_use_id && !!m.uuid)
         const lastUuid = mainlineAssistants.length > 0
           ? mainlineAssistants[mainlineAssistants.length - 1]?.uuid
           : undefined
@@ -739,11 +747,26 @@ export function isImageFile(filename: string): boolean {
 }
 
 /** 图片附件缩略图，点击可预览大图 */
-function AttachedImageThumb({ file, onEditComplete }: { file: AttachedFileRef; onEditComplete?: (editedDataUrl: string) => void }): React.ReactElement {
+function AttachedImageThumb({
+  file,
+  sessionId,
+  workspaceSlug,
+  onEditComplete,
+}: {
+  file: AttachedFileRef
+  sessionId: string | null
+  workspaceSlug?: string
+  onEditComplete?: (editedDataUrl: string) => void
+}): React.ReactElement {
   const [imageSrc, setImageSrc] = React.useState<string | null>(null)
   const [lightboxOpen, setLightboxOpen] = React.useState(false)
 
   React.useEffect(() => {
+    if (!sessionId) {
+      setImageSrc(null)
+      return
+    }
+
     const ext = file.filename.split('.').pop()?.toLowerCase() ?? 'png'
     const mimeMap: Record<string, string> = {
       png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
@@ -752,14 +775,18 @@ function AttachedImageThumb({ file, onEditComplete }: { file: AttachedFileRef; o
     const mediaType = mimeMap[ext] ?? 'image/png'
 
     window.electronAPI
-      .readAttachment(file.path)
+      .readAttachedFile(file.path, sessionId, workspaceSlug)
       .then((base64) => setImageSrc(`data:${mediaType};base64,${base64}`))
       .catch((err) => console.error('[AttachedImageThumb] 读取附件失败:', err))
-  }, [file.path, file.filename])
+  }, [file.path, file.filename, sessionId, workspaceSlug])
 
   const handleSave = React.useCallback((): void => {
-    window.electronAPI.saveImageAs(file.path, file.filename)
-  }, [file.path, file.filename])
+    if (!imageSrc) return
+    const link = document.createElement('a')
+    link.href = imageSrc
+    link.download = file.filename
+    link.click()
+  }, [file.filename, imageSrc])
 
   if (!imageSrc) {
     return <div className="w-[200px] h-[140px] rounded-lg bg-muted/30 animate-pulse shrink-0" />
@@ -886,13 +913,22 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
   const { files: attachedFiles, quotes, text } = parseAttachedFiles(stripScheduledRunMarker(rawText))
   const imageFiles = attachedFiles.filter((f) => isImageFile(f.filename))
   const activeSessionId = useAtomValue(activeSessionIdAtom)
+  const sessions = useAtomValue(agentSessionsAtom)
+  const workspaces = useAtomValue(agentWorkspacesAtom)
   const setSessionPendingFiles = useSetAtom(agentSessionPendingFilesAtom)
   const nonImageFiles = attachedFiles.filter((f) => !isImageFile(f.filename))
   const meta = extractMeta(message as unknown as SDKMessage)
+  const messageSessionId = getMessageSessionId(message as unknown as SDKMessage) ?? activeSessionId
+  const messageWorkspaceSlug = React.useMemo(() => {
+    if (!messageSessionId) return undefined
+    const workspaceId = sessions.find((session) => session.id === messageSessionId)?.workspaceId
+    if (!workspaceId) return undefined
+    return workspaces.find((workspace) => workspace.id === workspaceId)?.slug
+  }, [messageSessionId, sessions, workspaces])
 
   const handleImageEditComplete = React.useCallback((editedDataUrl: string): void => {
     const base64 = editedDataUrl.split(',')[1]
-    if (!base64 || !activeSessionId) return
+    if (!base64 || !messageSessionId) return
 
     const id = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const pending: AgentPendingFile = {
@@ -909,12 +945,12 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
     window.__pendingAgentFileData.set(id, base64)
 
     setSessionPendingFiles((prev) => {
-      const sessionFiles = prev.get(activeSessionId) ?? []
+      const sessionFiles = prev.get(messageSessionId) ?? []
       const map = new Map(prev)
-      map.set(activeSessionId, [...sessionFiles, pending])
+      map.set(messageSessionId, [...sessionFiles, pending])
       return map
     })
-  }, [activeSessionId, setSessionPendingFiles])
+  }, [messageSessionId, setSessionPendingFiles])
 
   return (
     <Message from="user">
@@ -947,7 +983,13 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
         {imageFiles.length > 0 && (
           <div className="flex flex-wrap gap-2.5 mb-2">
             {imageFiles.map((file) => (
-              <AttachedImageThumb key={file.path} file={file} onEditComplete={handleImageEditComplete} />
+              <AttachedImageThumb
+                key={file.path}
+                file={file}
+                sessionId={messageSessionId}
+                workspaceSlug={messageWorkspaceSlug}
+                onEditComplete={handleImageEditComplete}
+              />
             ))}
           </div>
         )}

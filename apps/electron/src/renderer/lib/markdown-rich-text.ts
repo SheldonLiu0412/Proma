@@ -494,6 +494,7 @@ export function htmlToMarkdown(html: string): string {
         const dataId = el.getAttribute('data-id') || ''
         const suggestionChar = el.getAttribute('data-mention-suggestion-char') || '@'
         if (dataType === 'mention') {
+          // Skill mention 的 data-id 是运行时 skill.name；slug 只用于文件管理和 UI key。
           if (suggestionChar === '/') return `/skill:${dataId}`
           if (suggestionChar === '#') return `#mcp:${dataId}`
           if (suggestionChar === '&') return `&session:${dataId}`

@@ -49,7 +49,7 @@ function buildWorkspaceMemoryInitPrompt(historyRange: MemoryHistoryRange): strin
 1. 读取当前工作区${rangeLabel}的 Agent 工作会话，优先关注最新、最有代表性、用户实际完成工作的会话。如果证据不足，请说明而不是编造。
 2. 从这些会话中提炼工作区级别的稳定知识，包括项目结构、常用命令、架构约定、用户偏好、踩坑经验、重要决策和未来 Agent 必须知道的注意事项。
 3. 更新工作区根目录的 CLAUDE.md：只写稳定、跨会话有价值的项目指令和工作方式，避免写临时过程和聊天流水账。
-4. 更新工作区 .claude/memory/MEMORY.md，必要时创建主题文件：用它记录 SDK auto memory 应该长期回忆的经验、索引和主题路由。
+4. 更新工作区 .claude/memory/MEMORY.md，必要时创建主题文件：用它记录 auto memory 应该长期回忆的经验、索引和主题路由。
 5. 沉淀并持续迭代一份「用户画像」记忆，写入 .claude/memory/user-profile.md（并在 MEMORY.md 索引中登记）。这份画像用于让未来的 Agent 越来越懂用户，应包含：
    - 用户的角色、技术背景与擅长领域
    - 稳定的工作方式与协作偏好（沟通风格、语言、颗粒度、对确认/自动化的偏好等）
