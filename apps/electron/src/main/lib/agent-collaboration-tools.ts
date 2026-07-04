@@ -732,7 +732,6 @@ export async function buildAgentCollaborationTools(ctx: CollaborationToolContext
   ])
   const permissionMode = Type.Union([
     Type.Literal('plan'),
-    Type.Literal('auto'),
     Type.Literal('bypassPermissions'),
   ])
   const delegateItem = Type.Object({

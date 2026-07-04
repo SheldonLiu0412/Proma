@@ -2191,7 +2191,7 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
           ? 'bg-background rounded-2xl shadow-xl dark:shadow-md'
           : 'bg-[hsl(var(--sidebar-surface))]'
       )}
-      style={{ width: width ?? 300, minWidth: 200, flexShrink: 1 }}
+      style={{ width: width ?? 300, minWidth: 200, flexShrink: 0 }}
     >
       <SidebarWindowDragStrip
         height={isMac ? SIDEBAR_DRAG_STRIP_HEIGHT.expandedMac : SIDEBAR_DRAG_STRIP_HEIGHT.expanded}
@@ -2224,7 +2224,7 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
       <div className="px-3 pt-2 flex items-center gap-1.5">
         <button
           onClick={mode === 'agent' ? handleNewAgentSession : handleNewConversation}
-          className="flex-1 flex items-center gap-2 px-3 py-2 rounded-[10px] text-[13px] font-medium text-foreground/70 sidebar-control-surface hover:text-foreground transition-[background-color,color] duration-150 titlebar-no-drag"
+          className="flex-1 flex items-center gap-2 h-10 px-3 rounded-[10px] text-[13px] font-medium text-foreground/70 sidebar-control-surface hover:text-foreground transition-[background-color,color] duration-150 titlebar-no-drag"
         >
           <Plus size={14} />
           <span>{mode === 'agent' ? '新会话' : '新对话'}</span>
@@ -2233,7 +2233,7 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
           <TooltipTrigger asChild>
             <button
               onClick={() => setSearchDialogOpen(true)}
-              className="flex-shrink-0 size-[36px] flex items-center justify-center rounded-[10px] text-foreground/40 sidebar-control-surface hover:text-foreground/60 transition-[background-color,color] duration-150 titlebar-no-drag"
+              className="flex-shrink-0 size-10 flex items-center justify-center rounded-[10px] text-foreground/40 sidebar-control-surface hover:text-foreground/60 transition-[background-color,color] duration-150 titlebar-no-drag"
             >
               <Search size={14} />
             </button>
@@ -2808,7 +2808,7 @@ function SessionItemActions({
       <span
         title={`最后更新：${new Date(updatedAt).toLocaleString('zh-CN')}`}
         className={cn(
-          'absolute inset-y-0 right-0 block w-full text-right text-[11px] leading-[18px] tabular-nums text-foreground/35 transition-opacity duration-100',
+          'absolute inset-y-0 right-0 block w-full overflow-hidden whitespace-nowrap text-right text-[11px] leading-[18px] tabular-nums text-foreground/35 transition-opacity duration-100',
           forceVisible ? 'opacity-0' : 'opacity-100 group-hover:opacity-0',
         )}
       >
@@ -2816,7 +2816,7 @@ function SessionItemActions({
       </span>
       <div
         className={cn(
-          'absolute right-0 top-0 flex items-center gap-0.5 transition-opacity duration-100',
+          'absolute right-1 top-0 flex items-center gap-0.5 transition-opacity duration-100',
           forceVisible
             ? 'opacity-100 pointer-events-auto'
             : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto',
@@ -3534,8 +3534,14 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   // 非活跃部分仍保留原"最近 3 天 + 至多 5 条"预览策略，作为额外补充展示。
   // 用户点击"显示更多"会在折叠基线之上每次再额外展开 PROJECT_SESSION_EXPAND_STEP 条。
   const treeItems = buildAgentSessionTrees(group.sessions)
+  const prevActiveIdsRef = React.useRef<Set<string>>(new Set())
   const activeSessions = treeItems
-    .filter((item) => ACTIVE_SESSION_STATUSES.has(getSessionTreeStatus(item, agentIndicatorMap)))
+    .filter((item) =>
+      ACTIVE_SESSION_STATUSES.has(getSessionTreeStatus(item, agentIndicatorMap))
+      // 当用户点击"查看"时，会话的 completed 指示器被清除，但它仍是当前选中会话——
+      // 若它上一帧还在 activeSessions 中，保持其位置不变以避免视觉跳动
+      || (item.session.id === activeSessionId && prevActiveIdsRef.current.has(item.session.id))
+    )
     .slice()
     .sort((a, b) => {
       const delta = ACTIVE_SESSION_STATUS_PRIORITY[getSessionTreeStatus(a, agentIndicatorMap)]
@@ -3544,6 +3550,7 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
       return b.session.updatedAt - a.session.updatedAt
     })
   const activeIds = collectAgentSessionTreeIds(activeSessions)
+  React.useEffect(() => { prevActiveIdsRef.current = activeIds })
   // 非活跃部分按自然策略（最近 3 天窗口 + 预览上限）计算，且不依赖当前选中态，
   // 保持 group.sessions 的 updatedAt 倒序——这样点击已可见会话时顺序保持稳定，
   // 不会因为它变成 activeSessionId 而被提到顶部。

@@ -7,7 +7,6 @@
 
 import {
   type Automation,
-  type AutomationPermissionMode,
   type AutomationScheduleType,
   type CreateAutomationInput,
   type UpdateAutomationInput,
@@ -46,10 +45,6 @@ function validScheduleType(v: unknown): v is AutomationScheduleType {
   return v === 'interval' || v === 'daily' || v === 'weekly' || v === 'monthly' || v === 'once'
 }
 
-function validPermissionMode(v: unknown): v is AutomationPermissionMode {
-  return v === 'auto' || v === 'bypassPermissions'
-}
-
 function isFiniteInt(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v)
 }
@@ -83,9 +78,6 @@ function validateScheduleFields(input: Partial<CreateAutomationInput | UpdateAut
   if (input.maxRuns !== undefined && (!isFiniteInt(input.maxRuns) || input.maxRuns < 1)) {
     throw new Error(`非法的 maxRuns: ${String(input.maxRuns)}（应为 ≥1 的整数）`)
   }
-  if (input.permissionMode !== undefined && !validPermissionMode(input.permissionMode)) {
-    throw new Error(`非法的 permissionMode: ${String(input.permissionMode)}`)
-  }
   if (input.sessionMode !== undefined && input.sessionMode !== 'daily' && input.sessionMode !== 'reuse') {
     throw new Error(`非法的 sessionMode: ${String(input.sessionMode)}`)
   }
@@ -105,7 +97,6 @@ function summarizeAutomation(a: Automation, includeHistory: boolean): Record<str
     maxRuns: a.maxRuns,
     runCount: a.runCount ?? 0,
     completedAt: a.completedAt,
-    permissionMode: a.permissionMode,
     sessionMode: a.sessionMode,
     workspaceId: a.workspaceId,
     sourceSessionId: a.sourceSessionId,
@@ -143,7 +134,6 @@ function buildAutomationSchemas(Type: TypeBuilder) {
     Type.Literal('monthly'),
     Type.Literal('once'),
   ])
-  const permissionMode = Type.Union([Type.Literal('auto'), Type.Literal('bypassPermissions')])
   const sessionMode = Type.Union([Type.Literal('daily'), Type.Literal('reuse')])
   const describeSchema = <T extends TSchema>(schema: T, description: string): T => ({ ...schema, description })
   const strictObject = (properties: TProperties, description?: string) => (
@@ -169,7 +159,6 @@ function buildAutomationSchemas(Type: TypeBuilder) {
       scheduledAt: Type.Optional(Type.Integer({ minimum: 1, description: '一次性任务的绝对触发时间（毫秒时间戳）；scheduleType=once 时必填。用于"在某个具体时间点跑一次"，如 N 小时/天后或某个日期时刻' })),
       maxRuns: Type.Optional(Type.Integer({ minimum: 1, description: '最大运行次数上限（按实际执行次数计，成功+失败都算）；达到后任务自动停用。不传=不限次。可与任意 scheduleType 叠加，如 interval+maxRuns=3 表示"每隔一段时间跑，共跑 3 次就停"' })),
       active: Type.Optional(Type.Boolean({ description: '创建后是否启用，默认 true' })),
-      permissionMode: Type.Optional(describeSchema(permissionMode, '无人值守权限模式，默认 bypassPermissions；高风险任务可用 auto')),
       sessionMode: Type.Optional(describeSchema(sessionMode, '会话模式：daily=同一自然日内的触发复用同一个子会话，跨日新建（默认）；reuse=始终复用同一个子会话（保留长期上下文，token 成本更高）')),
     }),
     update: strictObject({
@@ -184,7 +173,6 @@ function buildAutomationSchemas(Type: TypeBuilder) {
       scheduledAt: Type.Optional(Type.Integer({ minimum: 1, description: '新的一次性触发时间（毫秒时间戳），scheduleType=once 时使用' })),
       maxRuns: Type.Optional(Type.Integer({ minimum: 1, description: '新的最大运行次数上限（按实际执行次数计）；改动会重置已执行次数计数' })),
       active: Type.Optional(Type.Boolean({ description: '启用或暂停任务' })),
-      permissionMode: Type.Optional(describeSchema(permissionMode, '新的无人值守权限模式')),
       sessionMode: Type.Optional(describeSchema(sessionMode, '新的会话模式：daily=同一自然日内复用，跨日新建；reuse=始终复用同一个子会话')),
     }),
     delete: strictObject({
@@ -258,7 +246,6 @@ export async function buildAutomationAgentTools(
           channelId: ctx.channelId,
           modelId: ctx.modelId,
           workspaceId: ctx.workspaceId,
-          permissionMode: args.permissionMode,
           sessionMode: args.sessionMode,
           sourceSessionId: ctx.sessionId,
           active: args.active ?? true,
@@ -295,7 +282,6 @@ export async function buildAutomationAgentTools(
           scheduledAt: args.scheduledAt,
           maxRuns: args.maxRuns,
           active: args.active,
-          permissionMode: args.permissionMode,
           sessionMode: args.sessionMode,
         }
         if (input.name !== undefined) assertNonBlank(input.name, 'name')
