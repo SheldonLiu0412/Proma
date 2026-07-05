@@ -13,6 +13,11 @@
 import { readFileSync } from 'node:fs'
 import { extname } from 'node:path'
 import { resolveAttachmentPath } from './config-paths'
+import {
+  isBinaryImageMediaType,
+  isVisionImageMediaType,
+  normalizeAttachmentMediaType,
+} from './attachment-media-types'
 
 // ===== 文件类型分类 =====
 
@@ -45,11 +50,16 @@ const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.csv', '.json', '.xml', '.html',
   '.js', '.ts', '.py', '.yaml', '.yml', '.toml',
   '.log', '.ini', '.cfg', '.conf', '.sh', '.bat',
-  '.css', '.scss', '.less', '.sql', '.graphql',
+  '.css', '.scss', '.less', '.sql', '.graphql', '.svg',
   '.env', '.gitignore', '.dockerfile',
 ])
 
-/** 所有支持文档解析的扩展名（不含图片） */
+/** 已知二进制图片格式，不应误按 UTF-8 文档读取 */
+const BINARY_IMAGE_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+])
+
+/** 所有支持文档解析的扩展名（不含二进制图片，SVG 作为文本处理） */
 const SUPPORTED_DOCUMENT_EXTENSIONS = new Set([
   '.pdf',
   ...OFFICE_EXTENSIONS,
@@ -69,12 +79,13 @@ export function isSupportedDocumentExtension(ext: string): boolean {
 }
 
 /**
- * 根据 MIME 类型判断是否为可解析文档（非图片附件）
+ * 根据 MIME 类型判断是否进入文档/普通文件附件流程。
  *
- * 排除图片类型，其余尝试按扩展名判断。
+ * vision 支持的图片会作为图片发送给模型；其它附件（包括 svg/bmp/ico）
+ * 进入文档流程，避免既不发 vision、也不提取/提示的黑洞。
  */
 export function isDocumentAttachment(mediaType: string): boolean {
-  return !mediaType.startsWith('image/')
+  return !isVisionImageMediaType(mediaType)
 }
 
 /**
@@ -121,6 +132,10 @@ export async function extractTextFromFile(filePath: string): Promise<string> {
   // 纯文本格式
   if (TEXT_EXTENSIONS.has(ext)) {
     return readFileSync(filePath, 'utf-8')
+  }
+
+  if (BINARY_IMAGE_EXTENSIONS.has(ext)) {
+    throw new Error(`图片文件 ${ext} 不能作为文档提取，请转换为 PNG/JPEG/GIF/WebP 后作为图片发送`)
   }
 
   // 未知格式：尝试当作文本读取
@@ -457,7 +472,12 @@ async function extractPdfWithPdfJs(buffer: Buffer): Promise<string> {
  * @param localPath 附件相对路径
  * @returns 提取的纯文本内容
  */
-export async function extractTextFromAttachment(localPath: string): Promise<string> {
+export async function extractTextFromAttachment(localPath: string, mediaType?: string): Promise<string> {
+  if (mediaType && isBinaryImageMediaType(mediaType)) {
+    const normalizedMediaType = normalizeAttachmentMediaType(mediaType)
+    throw new Error(`图片文件 ${normalizedMediaType} 不能作为文档提取，请转换为 PNG/JPEG/GIF/WebP 后作为图片发送`)
+  }
+
   const fullPath = resolveAttachmentPath(localPath)
   return extractTextFromFile(fullPath)
 }

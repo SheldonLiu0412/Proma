@@ -100,6 +100,8 @@ export interface SubagentToolDeps {
    * 否则子代理会绕过用户配置的预算/轮次上限（子会话独立于父 session，不共享 pi 的计费）。
    */
   runtimeGuard: AgentRuntimeGuard
+  /** 给子会话安装与父会话一致的 turn / tool 停止钩子。 */
+  installRuntimeGuardHooks: (session: AgentSession, guard: AgentRuntimeGuard) => void
 }
 
 /** 从 pi AssistantMessage 抽取纯文本（用于把子代理最终答复作为 tool_result 返回给父会话） */
@@ -233,6 +235,7 @@ export function createSubagentToolDefinition(deps: SubagentToolDeps): ToolDefini
       let lastAssistantText = ''
       try {
         session.agent.toolExecution = 'sequential'
+        deps.installRuntimeGuardHooks(session, deps.runtimeGuard)
 
         // 子会话内的 assistant 消息 uuid 分组（复刻父会话逻辑，保证同一条 assistant 的流式增量共用 uuid）
         let activeUuid: string | undefined

@@ -31,16 +31,16 @@ import {
 } from '@proma/shared'
 import type { PermissionRequest, PromaPermissionMode, AskUserRequest, ExitPlanModeRequest, SDKSystemMessage } from '@proma/shared'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
-import { isPromptTooLongError, isThinkingSignatureError, isRuntimeNotFoundError, friendlyErrorMessage, mapSDKErrorToTypedError, extractErrorDetails, shouldKeepChannelOpen } from './adapters/pi-agent-adapter'
+import { isPromptTooLongError, isThinkingSignatureError, isRuntimeNotFoundError, friendlyErrorMessage, mapSDKErrorToTypedError, extractErrorDetails } from './adapters/pi-agent-adapter'
 import { isTransientNetworkError, isMalformedResponseError, isSessionNotFoundError } from './error-patterns'
 import { AgentEventBus } from './agent-event-bus'
 import { decryptApiKey, getChannelById, listChannels } from './channel-manager'
 import { getAdapter, fetchTitle } from '@proma/core'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
-import { appendSDKMessages, updateAgentSessionMeta, getAgentSessionMeta, getAgentSessionMessages, getAgentSessionSDKMessages, truncateSDKMessages, resolveRewindUserMessageUuid } from './agent-session-manager'
-import { getAgentWorkspace, getWorkspaceMcpConfig, getWorkspaceAutoMemoryDir, getWorkspaceAttachedDirectories, getWorkspaceAttachedFiles, getWorkspaceSkills } from './agent-workspace-manager'
-import { getAgentSessionMessagesPath, getAgentSessionsDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getSdkConfigDir, getWorkspaceFilesDir, getWorkspaceSkillsDir, getBundledCliPath } from './config-paths'
+import { appendSDKMessages, updateAgentSessionMeta, getAgentSessionMeta, getAgentSessionMessages, getAgentSessionSDKMessages, truncateSDKMessages, resolveRewindUserMessageUuid, rewindFilesFromLegacySnapshot, type LegacyFileHistoryRestoreResult } from './agent-session-manager'
+import { getAgentWorkspace, getWorkspaceMcpConfig, getWorkspaceAutoMemoryDir, getWorkspaceAttachedDirectories, getWorkspaceAttachedFiles, getWorkspaceSkills, listAgentWorkspaces } from './agent-workspace-manager'
+import { getAgentSessionMessagesPath, getAgentSessionsDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getSdkConfigDir, getWorkspaceFilesDir, getWorkspaceSkillsDir, getBundledCliPath, resolveWorkspaceFilesDir } from './config-paths'
 import { getRuntimeStatus } from './runtime-init'
 import { getSettings } from './settings-service'
 import { buildSystemPrompt, buildDynamicContext } from './agent-prompt-builder'
@@ -56,7 +56,7 @@ import { estimateTokenCount, WRITE_CONTENT_TOKEN_THRESHOLD } from './agent-tool-
 import { buildBuiltinAgentTools } from './builtin-mcp/registry'
 import { getBuiltinMcpDefinitions } from './builtin-mcp/baseline'
 import { buildMcpBridgeTools, type PromaMcpServerConfig } from './mcp-pi-bridge'
-import { createAgentSidecarSnapshot, restoreAgentSidecarSnapshot, type AgentSidecarSnapshotRootInput, type AgentSidecarRestoreResult } from './agent-sidecar-snapshot'
+import { createAgentSidecarSnapshot, restoreAgentSidecarSnapshot, type AgentSidecarSnapshotRootInput, type AgentSidecarRestoreOptions, type AgentSidecarRestoreResult } from './agent-sidecar-snapshot'
 import { buildAgentRuntimeEnv } from './agent-runtime-env'
 
 // ===== 类型定义 =====
@@ -81,17 +81,20 @@ export interface SessionCallbacks {
 // ===== 工具函数 =====
 
 /**
- * 从 stderr 中提取 API 错误信息
+ * 从错误诊断文本中提取 API 错误信息。
  *
- * 解析类似这样的错误：
+ * Pi runtime 是 in-process adapter，没有旧 CLI stderr 通道；这里解析的是异常消息、
+ * result.errors[] 等可用诊断拼出的文本。
+ *
+ * 解析类似这样的片段：
  * "401 {\"error\":{\"message\":\"...\"}}"
  * "API error: 400 Bad Request ..."
  */
-function extractApiError(stderr: string): { statusCode: number; message: string } | null {
-  if (!stderr) return null
+function extractApiError(diagnosticText: string): { statusCode: number; message: string } | null {
+  if (!diagnosticText) return null
 
   // 模式 1：JSON 错误格式 - "401 {...}"
-  const jsonMatch = stderr.match(/(\d{3})\s+(\{[^}]*"error"[^}]*\})/s)
+  const jsonMatch = diagnosticText.match(/(\d{3})\s+(\{[^}]*"error"[^}]*\})/s)
   if (jsonMatch) {
     try {
       const statusCode = parseInt(jsonMatch[1]!)
@@ -104,7 +107,7 @@ function extractApiError(stderr: string): { statusCode: number; message: string 
   }
 
   // 模式 2：API error 格式 - "API error (attempt X/Y): 401 401 {...}"
-  const apiErrorMatch = stderr.match(/API error[^:]*:\s+(\d{3})\s+\d{3}\s+(\{.*?\})/s)
+  const apiErrorMatch = diagnosticText.match(/API error[^:]*:\s+(\d{3})\s+\d{3}\s+(\{.*?\})/s)
   if (apiErrorMatch) {
     try {
       const statusCode = parseInt(apiErrorMatch[1]!)
@@ -117,7 +120,7 @@ function extractApiError(stderr: string): { statusCode: number; message: string 
   }
 
   // 模式 3：直接的状态码 + 消息
-  const simpleMatch = stderr.match(/(\d{3})[:\s]+(.+?)(?:\n|$)/i)
+  const simpleMatch = diagnosticText.match(/(\d{3})[:\s]+(.+?)(?:\n|$)/i)
   if (simpleMatch) {
     const statusCode = parseInt(simpleMatch[1]!)
     const message = simpleMatch[2]!.trim()
@@ -230,7 +233,7 @@ function getMessageUuid(message: SDKMessage): string | undefined {
 function isAutoRetryableCatchError(
   apiError: { statusCode: number; message: string } | null,
   rawErrorMessage?: string,
-  stderr?: string,
+  diagnosticText?: string,
 ): boolean {
   if (apiError) {
     // 529 是 Anthropic 的过载状态码，通常很快恢复；与 429 / 5xx 一并重试。
@@ -240,14 +243,14 @@ function isAutoRetryableCatchError(
   if (rawErrorMessage) {
     if (rawErrorMessage.includes('context_management')) return true
   }
-  // 兜底：extractApiError 未识别但 stderr / 错误文本中包含 502 / 529 或 overloaded 关键字时也视为可重试
+  // 兜底：extractApiError 未识别但诊断 / 错误文本中包含 502 / 529 或 overloaded 关键字时也视为可重试
   // 502 (Bad Gateway) 通常是上游网关瞬时异常，与 529 一样很快自行恢复
-  const text = `${rawErrorMessage ?? ''}\n${stderr ?? ''}`
+  const text = `${rawErrorMessage ?? ''}\n${diagnosticText ?? ''}`
   if (/\b502\b|\b529\b|overloaded/i.test(text)) return true
   // 瞬时网络错误（terminated / ECONNRESET / socket hang up 等）
-  if (isTransientNetworkError(rawErrorMessage, stderr)) return true
+  if (isTransientNetworkError(rawErrorMessage, diagnosticText)) return true
   // 上游响应体解析失败（JSON Parse error 等）：网关瞬时异常返回非 JSON 体，重试通常即可恢复
-  if (isMalformedResponseError(rawErrorMessage, stderr)) return true
+  if (isMalformedResponseError(rawErrorMessage, diagnosticText)) return true
   return false
 }
 
@@ -409,6 +412,66 @@ function buildSidecarSnapshotRoots(
 
 function buildSessionCwdMap(sessionId: string, cwd: string): Map<string, string> {
   return new Map([[sessionId, cwd]])
+}
+
+function uniqueNonEmpty(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0))]
+}
+
+function collectLegacySdkSessionIds(sessionMeta: AgentSessionMeta, assistantMessageUuid?: string): string[] {
+  const messages = getAgentSessionSDKMessages(sessionMeta.id)
+  const targetMessage = assistantMessageUuid
+    ? messages.find((message) => 'uuid' in message && (message as { uuid?: string }).uuid === assistantMessageUuid)
+    : undefined
+  const targetSdkSessionId = targetMessage && 'session_id' in targetMessage
+    ? (targetMessage as { session_id?: string }).session_id
+    : undefined
+  const historicalSdkSessionIds = messages
+    .map((message) => 'session_id' in message ? (message as { session_id?: string }).session_id : undefined)
+
+  return uniqueNonEmpty([
+    targetSdkSessionId,
+    sessionMeta.legacySdkSessionId,
+    sessionMeta.forkSourceSdkSessionId,
+    sessionMeta.sdkSessionId,
+    ...historicalSdkSessionIds,
+  ])
+}
+
+function buildWorkspaceFilesRootPathMap(targetWorkspaceSlug?: string): Map<string, string> {
+  const map = new Map<string, string>()
+  const targetWorkspaceFiles = targetWorkspaceSlug ? resolve(resolveWorkspaceFilesDir(targetWorkspaceSlug)) : undefined
+  for (const workspace of listAgentWorkspaces()) {
+    const sourceWorkspaceFiles = resolve(resolveWorkspaceFilesDir(workspace.slug))
+    map.set(sourceWorkspaceFiles, targetWorkspaceFiles ?? sourceWorkspaceFiles)
+  }
+  return map
+}
+
+function buildSidecarRestoreOptions(params: {
+  sessionId: string
+  currentSessionCwd?: string
+  sessionMeta: AgentSessionMeta
+  workspaceSlug?: string
+  extraRootPathMap?: Map<string, string>
+}): AgentSidecarRestoreOptions | undefined {
+  const { sessionId, currentSessionCwd, sessionMeta, workspaceSlug, extraRootPathMap } = params
+  const rootPathMap = buildWorkspaceFilesRootPathMap(workspaceSlug)
+  for (const dir of collectAttachedDirectories({ sessionMeta, workspaceSlug })) {
+    const resolved = resolve(dir)
+    rootPathMap.set(resolved, resolved)
+  }
+  for (const [source, target] of extraRootPathMap ?? new Map<string, string>()) {
+    rootPathMap.set(resolve(source), resolve(target))
+  }
+
+  if (!currentSessionCwd && rootPathMap.size === 0) return undefined
+
+  return {
+    ...(currentSessionCwd ? { sessionCwdById: buildSessionCwdMap(sessionId, currentSessionCwd) } : {}),
+    rootPathMap,
+    restoreUnmappedRoots: false,
+  }
 }
 
 function isMissingSidecarError(error?: string): boolean {
@@ -700,7 +763,7 @@ export class AgentOrchestrator {
    */
   async sendMessage(input: AgentSendInput, callbacks: SessionCallbacks): Promise<void> {
     const { sessionId, userMessage, channelId, modelId, workspaceId, additionalDirectories, customMcpServers, permissionModeOverride, mentionedSkills, mentionedMcpServers, mentionedSessionIds, automationContext } = input
-    const stderrChunks: string[] = []
+    const diagnosticChunks: string[] = []
 
     // 0. 并发保护
     if (this.activeSessions.has(sessionId)) {
@@ -818,16 +881,6 @@ export class AgentOrchestrator {
     ): void => {
       releaseActiveRun()
       callbacks.onComplete(messages, opts)
-    }
-    // 轻量完成：turn 主体结束但仍有后台任务在飞行。
-    // 关键区别——不调用 releaseActiveRun，保留 activeSessions/activeChannels/sessionPermissionModes，
-    // 以便 ① adapter 保持的通道在任务完成时自动续轮 ② 用户在等待期手动注入消息能复用通道。
-    // UI 侧通过 backgroundTasksPending 进入"空闲可输入"态（spinner 停、输入框启用）。
-    const idleComplete = (
-      messages?: AgentMessage[],
-      opts?: { startedAt?: number; resultSubtype?: string; resultErrors?: string[] },
-    ): void => {
-      callbacks.onComplete(messages, { ...opts, backgroundTasksPending: true })
     }
     const failRun = (
       error: string,
@@ -1274,10 +1327,6 @@ export class AgentOrchestrator {
         ...(appSettings.agentMaxBudgetUsd != null && appSettings.agentMaxBudgetUsd > 0 && {
           maxBudgetUsd: appSettings.agentMaxBudgetUsd,
         }),
-        onStderr: (data: string) => {
-          stderrChunks.push(data)
-          console.error(`[Agent SDK stderr] ${data}`)
-        },
         onSessionId: (sdkSessionId: string) => {
           // 仅在 session_id 真正变化时才持久化。SDK v2 几乎每条消息都会回调 onSessionId，
           // 旧逻辑误用「初始快照后永不更新」的 existingSdkSessionId 作比较（回调里更新的是
@@ -1424,10 +1473,6 @@ export class AgentOrchestrator {
           // 终止路径失效，需排查。
           let drainTimeoutPromise: Promise<'drain_timeout'> | null = null
           const RESULT_DRAIN_TIMEOUT_MS = 2_000
-          // 后台任务等待态：result 走轻量完成后置 true，下一轮真正开始（收到 assistant/user/task 消息）时
-          // 置回 false 并发 run_resumed，让 UI 从空闲态恢复运行态。
-          let awaitingBackgroundWake = false
-
           while (true) {
             if (!pendingNext) {
               pendingNext = queryIterator.next()
@@ -1467,17 +1512,6 @@ export class AgentOrchestrator {
               return
             }
 
-            // 后台任务唤醒：轻量完成后处于等待态，收到新一轮的首条实质消息时
-            // 发 run_resumed，让 UI 从"空闲可输入"恢复到"运行中"。
-            // applyAgentEvent 的流式分支不会重置 running，故必须显式通知。
-            if (awaitingBackgroundWake) {
-              const sub = msg.type === 'system' ? (msg as { subtype?: string }).subtype : undefined
-              if (msg.type === 'assistant' || msg.type === 'user' || msg.type === 'tool_progress' || sub === 'task_started' || sub === 'task_progress') {
-                awaitingBackgroundWake = false
-                this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'run_resumed', sessionId } })
-              }
-            }
-
             // SDK 权限模式可能在 canUseTool 前直接批准工具（如 bypassPermissions）。
             // 因此计划阶段状态要从实际 tool_use 流里同步，不能只依赖权限回调。
             if (msg.type === 'assistant') {
@@ -1513,7 +1547,7 @@ export class AgentOrchestrator {
                   existingSdkSessionId = undefined
                   capturedSdkSessionId = undefined
                   lastRetryableError = this.prepareSessionNotFoundRecovery(sessionId, queryOptions, contextualMessage, agentCwd, workspaceSlug, accumulatedMessages, queryStartedAt)
-                  stderrChunks.length = 0
+                  diagnosticChunks.length = 0
                   shouldRetryFromError = true
                   break
                 }
@@ -1541,7 +1575,7 @@ export class AgentOrchestrator {
                     '思考签名不兼容，切换到上下文回填模式',
                     true,  // 跨模型签名不兼容是唯一确定永久无效的场景，清除磁盘 sdkSessionId
                   )
-                  stderrChunks.length = 0
+                  diagnosticChunks.length = 0
                   shouldRetryFromError = true
                   break
                 }
@@ -1569,7 +1603,7 @@ export class AgentOrchestrator {
                     '上下文过长，切换到上下文回填模式',
                     true,
                   )
-                  stderrChunks.length = 0
+                  diagnosticChunks.length = 0
                   shouldRetryFromError = true
                   break
                 }
@@ -1583,8 +1617,8 @@ export class AgentOrchestrator {
                   this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
                   accumulatedMessages.length = 0
                   // 与 catch 路径（isAutoRetryableCatchError）和思考签名回填路径保持一致：
-                  // 重试前清空已累积的 stderr，避免 25 次重试上限内字符串无限增长
-                  stderrChunks.length = 0
+                  // 重试前清空已累积的诊断文本，避免 25 次重试上限内字符串无限增长
+                  diagnosticChunks.length = 0
                   shouldRetryFromError = true
                   break
                 }
@@ -1673,6 +1707,9 @@ export class AgentOrchestrator {
               capturedResultErrors = Array.isArray(rawResultErrors)
                 ? rawResultErrors.filter((e): e is string => typeof e === 'string' && e.trim().length > 0)
                 : undefined
+              if (capturedResultErrors?.length) {
+                diagnosticChunks.push(capturedResultErrors.join('\n'))
+              }
               const lastAssistantUuid = [...accumulatedMessages]
                 .reverse()
                 .find((message) => message.type === 'assistant' && !isPartialSDKMessage(message))
@@ -1690,19 +1727,19 @@ export class AgentOrchestrator {
               }
               this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
               accumulatedMessages.length = 0
-              // 软中断 / 延迟工具 / hook 暂停等场景下，adapter 保留 channel
-              // 等待队列或后续消息继续 drive Query，此处跳过 drain 超时以免误关闭事件循环。
-              // Pi adapter 当前没有需要保活通道的 terminal reason；这里保留扩展点。
-              // adapter 在"本轮结束但仍有后台任务/定时任务在飞行"时打的注解：
-              // 走轻量完成（UI 空闲可输入、host 保留会话），等待 task_notification 自动续轮。
-              const keptOpenForTasks = (msg as Record<string, unknown>)._keepChannelOpenForTasks === true
-              const keepChannelOpen = shouldKeepChannelOpen(resultTerminalReason) || keptOpenForTasks
+              const legacyKeptOpenForTasks = (msg as Record<string, unknown>)._keepChannelOpenForTasks === true
+              if (legacyKeptOpenForTasks) {
+                console.warn(
+                  '[Agent 编排] Pi runtime 不支持旧后台任务自动续轮，已忽略 _keepChannelOpenForTasks；' +
+                  '长耗时或需后台收敛的工作请使用 Proma automation / collaboration 工具。',
+                )
+              }
               // 分类打点：跟踪线上哪种 terminal_reason 最常见，配合 deferred_tool_use 回填决策
               const hasDeferredTool = (msg as { deferred_tool_use?: unknown }).deferred_tool_use != null
               console.log(
                 `[Agent 编排] result 到达: sessionId=${sessionId}, subtype=${capturedResultSubtype ?? 'unknown'}, ` +
-                `terminal_reason=${resultTerminalReason ?? 'undefined'}, keepChannelOpen=${keepChannelOpen}` +
-                (keptOpenForTasks ? ', keptOpenForTasks=true' : '') +
+                `terminal_reason=${resultTerminalReason ?? 'undefined'}` +
+                (legacyKeptOpenForTasks ? ', ignoredLegacyKeepChannelOpen=true' : '') +
                 (hasDeferredTool ? ', hasDeferredTool=true' : '') +
                 (capturedResultErrors?.length ? `, errors=${JSON.stringify(capturedResultErrors)}` : ''),
               )
@@ -1712,7 +1749,7 @@ export class AgentOrchestrator {
               if (
                 capturedResultSubtype === 'error_during_execution' &&
                 capturedResultErrors?.length &&
-                isSessionNotFoundError(capturedResultErrors.join('\n'), stderrChunks.join('\n')) &&
+                isSessionNotFoundError(capturedResultErrors.join('\n'), diagnosticChunks.join('\n')) &&
                 existingSdkSessionId &&
                 canAutoRetry(attempt)
               ) {
@@ -1721,7 +1758,7 @@ export class AgentOrchestrator {
                 existingSdkSessionId = undefined
                 capturedSdkSessionId = undefined
                 lastRetryableError = this.prepareSessionNotFoundRecovery(sessionId, queryOptions, contextualMessage, agentCwd, workspaceSlug, accumulatedMessages, queryStartedAt)
-                stderrChunks.length = 0
+                diagnosticChunks.length = 0
                 shouldRetryFromError = true
                 break
               }
@@ -1733,17 +1770,12 @@ export class AgentOrchestrator {
               ) {
                 lastRetryableError = capturedResultErrors[0]
                 console.log(`[Agent 编排] 可重试错误 (result error_during_execution, attempt ${attempt}/${MAX_AUTO_RETRIES}): ${lastRetryableError}`)
-                // 与 assistant.error / catch 重试路径保持一致：清空已累积 stderr，避免重试上限内无限增长
-                stderrChunks.length = 0
+                // 与 assistant.error / catch 重试路径保持一致：清空已累积诊断文本，避免重试上限内无限增长
+                diagnosticChunks.length = 0
                 shouldRetryFromError = true
                 break
               }
-              if (keptOpenForTasks) {
-                // 轻量完成：UI 置空闲可输入，但 host 保持运行态（不 releaseActiveRun、不 break、不启动 drain 超时），
-                // while 循环继续 park 在 queryIterator.next()，等待后台任务完成时 SDK 自动 yield 的新一轮消息。
-                awaitingBackgroundWake = true
-                idleComplete(getAgentSessionMessages(sessionId), { startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
-              } else if (!keepChannelOpen && !drainTimeoutPromise) {
+              if (!drainTimeoutPromise) {
                 // 启动 drain 超时安全网：正常情况下 adapter 收到 terminal result 会主动 break
                 // 触发 iterator.return → 下一次 next() 立即返回 done，此 timeout 不会触发。
                 // 仅在极端情况下（adapter 主动终止失效、SDK 行为再次变化）保护事件循环不无限挂起。
@@ -1806,13 +1838,13 @@ export class AgentOrchestrator {
           break  // 成功完成，退出重试循环
 
         } catch (error) {
-          // 打印 stderr
-          const fullStderr = stderrChunks.join('').trim()
-          if (fullStderr) {
-            console.error(`[Agent 编排] 完整 stderr 输出 (${fullStderr.length} 字符):`)
-            console.error(fullStderr)
+          // 打印可用诊断文本。Pi 是 in-process runtime，没有旧 CLI stderr 通道。
+          const fullDiagnosticOutput = diagnosticChunks.join('\n').trim()
+          if (fullDiagnosticOutput) {
+            console.error(`[Agent 编排] 完整诊断输出 (${fullDiagnosticOutput.length} 字符):`)
+            console.error(fullDiagnosticOutput)
           } else {
-            console.error(`[Agent 编排] stderr 为空`)
+            console.error('[Agent 编排] 无额外诊断输出')
           }
 
           // 用户主动中止
@@ -1826,24 +1858,24 @@ export class AgentOrchestrator {
             return
           }
 
-          // 从 stderr 提取 API 错误
-          const stderrOutput = stderrChunks.join('').trim()
-          const apiError = extractApiError(stderrOutput)
+          // 从可用诊断文本提取 API 错误
+          const diagnosticOutput = diagnosticChunks.join('\n').trim()
+          const apiError = extractApiError(diagnosticOutput)
           const rawErrorMessage = error instanceof Error ? error.message : ''
           const catchLooksPromptTooLong = isPromptTooLongError(
             apiError?.message ?? '',
             rawErrorMessage,
-            stderrOutput,
+            diagnosticOutput,
           )
 
           // Session 不存在错误：清除 sdkSessionId，切换到上下文回填模式重试
-          if (isSessionNotFoundError(rawErrorMessage, stderrOutput) && existingSdkSessionId && canAutoRetry(attempt)) {
+          if (isSessionNotFoundError(rawErrorMessage, diagnosticOutput) && existingSdkSessionId && canAutoRetry(attempt)) {
             invisibleRecoveryAttempts += 1
             skipNextRetryDelay = true
             existingSdkSessionId = undefined
             capturedSdkSessionId = undefined
             lastRetryableError = this.prepareSessionNotFoundRecovery(sessionId, queryOptions, contextualMessage, agentCwd, workspaceSlug, accumulatedMessages, queryStartedAt)
-            stderrChunks.length = 0
+            diagnosticChunks.length = 0
             continue  // 进入下一次 retry 循环
           }
 
@@ -1866,13 +1898,13 @@ export class AgentOrchestrator {
               '上下文过长，切换到上下文回填模式',
               true,
             )
-            stderrChunks.length = 0
+            diagnosticChunks.length = 0
             continue  // 进入下一次 retry 循环
           }
 
           // Thinking signature 不兼容：先自动清除 SDK resume 关系并用上下文回填重跑一次。
           if (
-            isThinkingSignatureError(apiError?.message ?? '', `${rawErrorMessage}\n${stderrOutput}`) &&
+            isThinkingSignatureError(apiError?.message ?? '', `${rawErrorMessage}\n${diagnosticOutput}`) &&
             canTryThinkingSignatureRecovery(attempt)
           ) {
             thinkingSignatureRecoveryAttempted = true
@@ -1892,12 +1924,12 @@ export class AgentOrchestrator {
               '思考签名不兼容，切换到上下文回填模式',
               true,  // 跨模型签名不兼容是唯一确定永久无效的场景，清除磁盘 sdkSessionId
             )
-            stderrChunks.length = 0
+            diagnosticChunks.length = 0
             continue  // 进入下一次 retry 循环
           }
 
           // 判断是否可重试
-          if (isAutoRetryableCatchError(apiError, rawErrorMessage, stderrOutput) && canAutoRetry(attempt)) {
+          if (isAutoRetryableCatchError(apiError, rawErrorMessage, diagnosticOutput) && canAutoRetry(attempt)) {
             lastRetryableError = apiError
               ? `API Error ${apiError.statusCode}: ${apiError.message}`
               : (error instanceof Error ? error.message : '未知错误')
@@ -1905,7 +1937,7 @@ export class AgentOrchestrator {
             // 保存部分内容
             this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
             accumulatedMessages.length = 0
-            stderrChunks.length = 0
+            diagnosticChunks.length = 0
             continue  // 进入下一次 retry 循环
           }
 
@@ -1935,7 +1967,7 @@ export class AgentOrchestrator {
             // 检测是否为 prompt too long 错误
             const isPromptTooLong = isPromptTooLongError(
               userFacingError,
-              `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n${stderrOutput}`,
+              `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n${diagnosticOutput}`,
             )
             const isThinkingSignature = isThinkingSignatureError(
               apiError?.message ?? '',
@@ -1943,7 +1975,7 @@ export class AgentOrchestrator {
                 userFacingError,
                 rawErrorMessage,
                 error instanceof Error ? (error.stack ?? error.message) : String(error),
-                stderrOutput,
+                diagnosticOutput,
               ].join('\n'),
             )
             // pi runtime 动态 import 失败（打包遗漏依赖 / 安装损坏）经此 catch 路径落地，
@@ -1953,7 +1985,7 @@ export class AgentOrchestrator {
                 userFacingError,
                 rawErrorMessage,
                 error instanceof Error ? (error.stack ?? error.message) : String(error),
-                stderrOutput,
+                diagnosticOutput,
               ].join('\n'),
             )
             const errorCode = isPromptTooLong
@@ -2122,6 +2154,74 @@ export class AgentOrchestrator {
 
   // ===== 快照回退 =====
 
+  private rewindFilesFromLegacyHistory(input: {
+    sessionMeta: AgentSessionMeta
+    assistantMessageUuid: string
+    userMessageUuid?: string
+    legacySdkSessionIds: string[]
+    currentSessionCwd?: string
+    workspaceSlug?: string
+  }): AgentSidecarRestoreResult | undefined {
+    const cwd = input.currentSessionCwd ?? homedir()
+    const rootPathMap = buildWorkspaceFilesRootPathMap(input.workspaceSlug)
+    const attachedDirectories = collectAttachedDirectories({
+      sessionMeta: input.sessionMeta,
+      workspaceSlug: input.workspaceSlug,
+    })
+    for (const dir of attachedDirectories) {
+      const resolved = resolve(dir)
+      rootPathMap.set(resolved, resolved)
+    }
+
+    const runLegacyRestore = (preferPromaUserUuid: boolean): LegacyFileHistoryRestoreResult => {
+      const canUsePromaUserUuid = preferPromaUserUuid
+        && !!input.userMessageUuid
+        && input.userMessageUuid !== '__LAST_TURN__'
+      return rewindFilesFromLegacySnapshot({
+        sdkSessionIds: input.legacySdkSessionIds,
+        cwd,
+        rootPathMap,
+        allowedDirectories: [cwd, ...attachedDirectories],
+        ...(canUsePromaUserUuid
+          ? { userMessageUuid: input.userMessageUuid }
+          : { assistantMessageUuid: input.assistantMessageUuid }),
+      })
+    }
+
+    let legacyResult = runLegacyRestore(true)
+    if (!legacyResult.canRewind && !legacyResult.lastTurn && input.userMessageUuid && input.userMessageUuid !== '__LAST_TURN__') {
+      legacyResult = runLegacyRestore(false)
+    }
+
+    if (legacyResult.canRewind) {
+      console.log(
+        `[Agent 编排] 已使用 legacy Claude file-history 恢复文件: `
+        + `sdkSessionId=${legacyResult.resolvedSdkSessionId ?? 'unknown'}, userUuid=${legacyResult.resolvedUserMessageUuid ?? 'unknown'}`,
+      )
+      return {
+        canRewind: true,
+        filesChanged: legacyResult.filesChanged,
+        restoredRoots: 0,
+        skippedRoots: 0,
+      }
+    }
+
+    if (legacyResult.lastTurn) {
+      console.warn('[Agent 编排] legacy Claude file-history 判断目标是最后一轮，跳过文件恢复并允许截断')
+      return {
+        canRewind: true,
+        filesChanged: [],
+        restoredRoots: 0,
+        skippedRoots: 0,
+      }
+    }
+
+    return {
+      canRewind: false,
+      error: `Proma sidecar 不可用，legacy Claude file-history fallback 也失败：${legacyResult.error ?? '未知错误'}`,
+    }
+  }
+
   /**
    * 回退会话到指定消息点
    *
@@ -2157,9 +2257,13 @@ export class AgentOrchestrator {
     const currentSessionCwd = workspaceSlug
       ? getAgentSessionWorkspacePath(workspaceSlug, sessionId)
       : undefined
-    const restoreOptions = currentSessionCwd
-      ? { sessionCwdById: buildSessionCwdMap(sessionId, currentSessionCwd) }
-      : undefined
+    const restoreOptions = buildSidecarRestoreOptions({
+      sessionId,
+      currentSessionCwd,
+      sessionMeta,
+      workspaceSlug,
+    })
+    const legacySdkSessionIds = collectLegacySdkSessionIds(sessionMeta, assistantMessageUuid)
     const userMessageUuid = resolveRewindUserMessageUuid(sessionId, assistantMessageUuid)
     console.log(`[Agent 编排] 回退: 解析 user uuid=${userMessageUuid || '未找到'} (assistant uuid=${assistantMessageUuid})`)
 
@@ -2199,11 +2303,33 @@ export class AgentOrchestrator {
       const targetUuid = userMessageUuid === '__LAST_TURN__' ? assistantMessageUuid : userMessageUuid
       if (targetUuid) {
         console.warn(`[Agent 编排] 当前会话 sidecar 恢复失败，尝试源 fork sidecar: source=${sessionMeta.forkSourceSessionId}`)
+        const forkSourceRootPathMap = new Map<string, string>([[sourceDir, currentDir]])
+        const sourceRestoreOptions = buildSidecarRestoreOptions({
+          sessionId: sessionMeta.forkSourceSessionId,
+          currentSessionCwd: currentDir,
+          sessionMeta,
+          workspaceSlug,
+          extraRootPathMap: forkSourceRootPathMap,
+        }) ?? {}
         fileRewindResult = await restoreAgentSidecarSnapshot(sessionMeta.forkSourceSessionId, targetUuid, {
-          rootPathMap: new Map([[sourceDir, currentDir]]),
+          ...sourceRestoreOptions,
           sessionCwdById: new Map([[sessionMeta.forkSourceSessionId, currentDir]]),
           restoreUnmappedRoots: false,
         })
+      }
+    }
+
+    if (!fileRewindResult.canRewind && !fileRewindResult.partial && legacySdkSessionIds.length > 0) {
+      const legacyResult = this.rewindFilesFromLegacyHistory({
+        sessionMeta,
+        assistantMessageUuid,
+        userMessageUuid,
+        legacySdkSessionIds,
+        currentSessionCwd,
+        workspaceSlug,
+      })
+      if (legacyResult) {
+        fileRewindResult = legacyResult
       }
     }
 

@@ -373,6 +373,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
   const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
+  const allAskUserRequests = useAtomValue(allPendingAskUserRequestsAtom)
+  const allPermissionRequests = useAtomValue(allPendingPermissionRequestsAtom)
+  const allExitPlanRequests = useAtomValue(allPendingExitPlanRequestsAtom)
+  const pendingAskUserRequests = allAskUserRequests.get(sessionId) ?? []
+  const pendingPermissionRequests = allPermissionRequests.get(sessionId) ?? []
+  const pendingExitPlanRequests = allExitPlanRequests.get(sessionId) ?? []
+  const hasBlockingRequests = pendingAskUserRequests.length > 0
+    || pendingPermissionRequests.length > 0
+    || pendingExitPlanRequests.length > 0
+  const hasBannerOverlay = hasBlockingRequests
   const workspaces = useAtomValue(agentWorkspacesAtom)
   // 保持 channelId 稳定：初始化前使用上次有效值，避免工具栏抖动
   const stableChannelIdRef = React.useRef(agentChannelId)
@@ -1464,6 +1474,12 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     const effectiveText = text || suggestion || ''
     const pendingFilesSnapshot = pendingFilesRef.current
     if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+    if (hasBlockingRequests) {
+      toast.info('请先处理当前请求', {
+        description: '当前会话有权限或交互请求待处理，处理后再发送。',
+      })
+      return
+    }
     if (!streaming && messagesRefreshingRef.current) {
       toast.info('上一轮消息正在同步', {
         description: '请稍等片刻再发送；队列会在同步完成后继续。',
@@ -1764,7 +1780,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     })
-  }, [inputContent, createBaseAdditionalDirectories, sessionId, agentChannelId, agentModelId, currentWorkspaceId, workspaces, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, sendPlainTextAgentMessage])
+  }, [inputContent, createBaseAdditionalDirectories, sessionId, agentChannelId, agentModelId, currentWorkspaceId, workspaces, streaming, backgroundWaiting, suggestion, hasAvailableModel, hasBlockingRequests, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, sendPlainTextAgentMessage])
 
   /** 停止生成 */
   const handleStop = React.useCallback((): void => {
@@ -2078,13 +2094,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     return () => window.removeEventListener('proma:focus-input', handler)
   }, [])
 
-  const allAskUserRequests = useAtomValue(allPendingAskUserRequestsAtom)
-  const allPermissionRequests = useAtomValue(allPendingPermissionRequestsAtom)
-  const allExitPlanRequests = useAtomValue(allPendingExitPlanRequestsAtom)
-  const hasBannerOverlay =
-    (allAskUserRequests.get(sessionId)?.length ?? 0) > 0 ||
-    (allExitPlanRequests.get(sessionId)?.length ?? 0) > 0
-  const hasBlockingRequests = hasBannerOverlay || (allPermissionRequests.get(sessionId)?.length ?? 0) > 0
   const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests
   const autoSendingQueuedRef = React.useRef(false)
   const queuedSendInFlightRef = React.useRef(false)
@@ -2194,7 +2203,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [togglePreviewPanel])
 
   const hasTextInput = inputContent.trim().length > 0
-  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
+  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput) && !hasBlockingRequests
 
   const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => [
     {

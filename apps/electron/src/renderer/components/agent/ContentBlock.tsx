@@ -27,6 +27,7 @@ import { ToolResultRenderer } from './tool-result-renderers'
 import { PreviewOpenButton } from './tool-result-renderers/preview-open-button'
 import { getTaskGetStatusLabel, parseTaskGetResult, type ParsedTaskGetResult } from './tool-result-renderers/task-get-result'
 import { parseTaskListResult, type ParsedTaskListItem } from './tool-result-renderers/task-list-result'
+import { summarizeToolResultContent } from './tool-result-summary'
 import { formatDuration } from './AgentMessages'
 import type {
   SDKContentBlock,
@@ -45,52 +46,6 @@ interface ToolResultData {
   result?: string
   isError?: boolean
   rawContent?: unknown
-}
-
-function safeStringify(value: unknown): string {
-  if (typeof value === 'string') return value
-  try {
-    const serialized = JSON.stringify(value, null, 2)
-    return serialized ?? String(value)
-  } catch {
-    return String(value)
-  }
-}
-
-function summarizeToolResultBlock(block: Record<string, unknown>): string {
-  if (block.type === 'text' && typeof block.text === 'string') return block.text
-  if (typeof block.text === 'string') return block.text
-  if (block.type === 'image') {
-    const mimeType = typeof block.mimeType === 'string'
-      ? block.mimeType
-      : typeof block.mediaType === 'string'
-        ? block.mediaType
-        : 'image'
-    const dataLength = typeof block.data === 'string' ? block.data.length : 0
-    return `[图片结果: ${mimeType}${dataLength > 0 ? `, base64 ${dataLength} chars` : ''}]`
-  }
-  if (typeof block.blob === 'string') {
-    const mimeType = typeof block.mimeType === 'string'
-      ? block.mimeType
-      : typeof block.mediaType === 'string'
-        ? block.mediaType
-        : 'binary'
-    return `[二进制结果: ${mimeType}]`
-  }
-  return safeStringify(block)
-}
-
-function summarizeToolResultContent(content: unknown): string | undefined {
-  if (typeof content === 'string') return content
-  if (content && typeof content === 'object' && !Array.isArray(content)) {
-    return summarizeToolResultBlock(content as Record<string, unknown>)
-  }
-  if (!Array.isArray(content)) return content == null ? undefined : safeStringify(content)
-  const parts = content.map((item) => {
-    if (!item || typeof item !== 'object') return safeStringify(item)
-    return summarizeToolResultBlock(item as Record<string, unknown>)
-  }).filter(Boolean)
-  return parts.length > 0 ? parts.join('\n') : undefined
 }
 
 function hasToolResultPayload(content: unknown): boolean {

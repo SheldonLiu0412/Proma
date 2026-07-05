@@ -2,8 +2,8 @@
  * Agent runtime 行为守卫。
  *
  * 这层只表达 Proma 自己承诺的语义，不绑定某个 SDK 的入口调用方式：
- * - 最大轮次：当模型还想继续调用工具时，优雅终止当前工具批次。
- * - 最大预算：在 runtime 返回已知费用后，停止后续工具批次并标记结果。
+ * - 最大轮次：在 turn 完成后、下一轮 prompt / steer / follow-up 前停止。
+ * - 最大预算：在 runtime 返回已知费用后，停止后续工具批次、prompt 与队列消息。
  * - 结构化输出：Pi 当前没有 provider-native schema response format，Proma 用提示词约束
  *   加最终结果校验补齐兼容行为。
  */
@@ -21,7 +21,9 @@ export interface RuntimeGuardResultOverride {
 
 export interface AgentRuntimeGuard {
   recordMessage(message: AgentMessage): void
+  shouldStopBeforeNextTurn(): boolean
   applyToolResult<TDetails>(result: AgentToolResult<TDetails>): AgentToolResult<TDetails>
+  getLimitResultOverride(): RuntimeGuardResultOverride | undefined
   getResultOverride(messages: AgentMessage[]): RuntimeGuardResultOverride | undefined
 }
 
@@ -41,8 +43,10 @@ interface GuardState {
   knownCostUsd: number
   maxTurnsReached: boolean
   budgetReached: boolean
-  stopReason?: Exclude<RuntimeGuardStopReason, 'output_validation_failed'>
+  stopReason?: RuntimeGuardLimitStopReason
 }
+
+type RuntimeGuardLimitStopReason = Exclude<RuntimeGuardStopReason, 'output_validation_failed'>
 
 const JSON_CODE_FENCE_PATTERN = /^```(?:json)?\s*([\s\S]*?)\s*```$/i
 
@@ -55,6 +59,10 @@ export function createAgentRuntimeGuard(options: AgentRuntimeGuardOptions): Agen
   }
   const maxTurns = normalizePositiveNumber(options.maxTurns)
   const maxBudgetUsd = normalizePositiveNumber(options.maxBudgetUsd)
+  const getLimitResultOverride = (): RuntimeGuardResultOverride | undefined => {
+    const reason = markLimitStopReason(state, maxTurns, maxBudgetUsd)
+    return reason ? createLimitResultOverride(reason, maxTurns, maxBudgetUsd) : undefined
+  }
 
   return {
     recordMessage(message) {
@@ -73,42 +81,24 @@ export function createAgentRuntimeGuard(options: AgentRuntimeGuardOptions): Agen
       }
     },
 
+    shouldStopBeforeNextTurn() {
+      return markLimitStopReason(state, maxTurns, maxBudgetUsd) != null
+    },
+
     applyToolResult(result) {
-      if (state.budgetReached) {
-        state.stopReason = 'max_budget_usd'
-        return { ...result, terminate: true }
-      }
-      if (state.maxTurnsReached) {
-        state.stopReason = 'max_turns'
+      if (markLimitStopReason(state, maxTurns, maxBudgetUsd)) {
         return { ...result, terminate: true }
       }
       return result
     },
 
+    getLimitResultOverride() {
+      return getLimitResultOverride()
+    },
+
     getResultOverride(messages) {
-      if (state.stopReason === 'max_budget_usd') {
-        return {
-          subtype: 'error_max_budget_usd',
-          terminalReason: 'max_budget_usd',
-          errors: [`已达到 Agent 预算上限（$${formatUsd(maxBudgetUsd)}），已停止后续工具调用。`],
-        }
-      }
-
-      if (state.budgetReached && maxBudgetUsd != null) {
-        return {
-          subtype: 'error_max_budget_usd',
-          terminalReason: 'max_budget_usd',
-          errors: [`已达到 Agent 预算上限（$${formatUsd(maxBudgetUsd)}）。`],
-        }
-      }
-
-      if (state.stopReason === 'max_turns') {
-        return {
-          subtype: 'error_max_turns',
-          terminalReason: 'max_turns',
-          errors: [`已达到 Agent 最大轮次限制（${maxTurns}）。`],
-        }
-      }
+      const limitOverride = getLimitResultOverride()
+      if (limitOverride) return limitOverride
 
       if (!options.outputFormat) return undefined
 
@@ -120,6 +110,43 @@ export function createAgentRuntimeGuard(options: AgentRuntimeGuardOptions): Agen
         errors: validation.map((failure) => `${failure.path}: ${failure.message}`),
       }
     },
+  }
+}
+
+function markLimitStopReason(
+  state: GuardState,
+  maxTurns: number | undefined,
+  maxBudgetUsd: number | undefined,
+): RuntimeGuardLimitStopReason | undefined {
+  if (state.stopReason) return state.stopReason
+  if (state.budgetReached && maxBudgetUsd != null) {
+    state.stopReason = 'max_budget_usd'
+    return state.stopReason
+  }
+  if (state.maxTurnsReached && maxTurns != null) {
+    state.stopReason = 'max_turns'
+    return state.stopReason
+  }
+  return undefined
+}
+
+function createLimitResultOverride(
+  reason: RuntimeGuardLimitStopReason,
+  maxTurns: number | undefined,
+  maxBudgetUsd: number | undefined,
+): RuntimeGuardResultOverride {
+  if (reason === 'max_budget_usd') {
+    return {
+      subtype: 'error_max_budget_usd',
+      terminalReason: 'max_budget_usd',
+      errors: [`已达到 Agent 预算上限（$${formatUsd(maxBudgetUsd)}），已停止后续 prompt、工具调用与排队消息。`],
+    }
+  }
+
+  return {
+    subtype: 'error_max_turns',
+    terminalReason: 'max_turns',
+    errors: [`已达到 Agent 最大轮次限制（${maxTurns}），已停止后续 prompt、工具调用与排队消息。`],
   }
 }
 

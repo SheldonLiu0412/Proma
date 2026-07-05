@@ -961,15 +961,20 @@ export async function restoreAgentSidecarSnapshot(
 
   try {
     const meta = await readSnapshotMeta(sessionId, messageUuid)
-    const skippedRoots = meta.roots.filter((root) => getRootRestoreMode(root, meta.sessionId) === 'skip').length
-    const restoreTargets = sortRootsForRestore(meta.roots, meta.sessionId)
+    const explicitSkippedRoots = meta.roots.filter((root) => getRootRestoreMode(root, meta.sessionId) === 'skip').length
+    const resolvedTargets = sortRootsForRestore(meta.roots, meta.sessionId)
       .map((root) => ({
         root,
         rootPath: resolveRestoreRootPath(root, meta.sessionId, options),
       }))
+    const restoreTargets = resolvedTargets
       .filter((target): target is { root: SnapshotRootMeta; rootPath: string } => target.rootPath !== undefined)
+    const unmappedSkippedRoots = resolvedTargets.filter((target) => (
+      target.rootPath === undefined && getRootRestoreMode(target.root, meta.sessionId) !== 'skip'
+    )).length
+    const skippedRoots = explicitSkippedRoots + unmappedSkippedRoots
 
-    if (meta.roots.length > 0 && restoreTargets.length === 0 && skippedRoots < meta.roots.length) {
+    if (meta.roots.length > 0 && restoreTargets.length === 0 && explicitSkippedRoots < meta.roots.length) {
       throw new Error('Proma sidecar 快照没有可恢复到当前会话的工作区 root')
     }
 

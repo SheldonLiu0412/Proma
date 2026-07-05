@@ -23,7 +23,7 @@ It is not just another chat box. Proma is meant to become a long-lived Agent wor
 
 ### Download
 
-Download the open-source version from [GitHub Releases](https://github.com/ErlichLiu/Proma/releases). The current release notes are for `v0.9.12`, with builds for macOS Apple Silicon, macOS Intel, and Windows.
+Download the open-source version from [GitHub Releases](https://github.com/ErlichLiu/Proma/releases). The release page provides builds for macOS Apple Silicon, macOS Intel, and Windows; use the latest GitHub release notes as the source of truth.
 
 If you want fewer API setup steps, you can also use the [Proma commercial version](https://proma.cool/download). The commercial and open-source versions run in parallel; the commercial version mainly adds built-in model channels and subscription options.
 
@@ -32,7 +32,7 @@ If you want fewer API setup steps, you can also use the [Proma commercial versio
 1. Open Proma and finish the environment check. Agent mode depends on local tooling, especially Git, Node.js / Bun, and a usable shell.
 2. Go to **Settings > Channels**, add at least one AI provider channel, and fill in Base URL, API Key, and model list.
 3. Chat mode can use OpenAI, Anthropic, Google, or OpenAI-compatible channels.
-4. Agent mode requires an Anthropic or Anthropic-compatible channel, such as Anthropic, DeepSeek, Kimi API, or Kimi Coding Plan.
+4. Agent mode currently requires an Anthropic or Anthropic-compatible channel, such as Anthropic, DeepSeek, Kimi API, Kimi Coding Plan, MiniMax, Qwen Anthropic, Zhipu Coding Plan, or Xiaomi MiMo. Regular OpenAI / Google / Doubao / Qwen / custom OpenAI-compatible endpoints are currently Chat-only.
 5. Go to **Settings > Agent** and choose the default Agent channel, model, and workspace.
 6. Configure memory, web search, or Feishu / DingTalk / WeChat bridges from their corresponding settings tabs if needed.
 
@@ -94,16 +94,21 @@ Proma supports Doubao-powered streaming voice input, both inside Proma and acros
 | Provider | Chat | Agent | Protocol |
 | --- | --- | --- | --- |
 | Anthropic | Supported | Supported | Anthropic Messages API |
+| Anthropic-compatible endpoint | Supported | Supported | User-provided full Messages request URL |
 | DeepSeek | Supported | Supported | Anthropic-compatible protocol |
 | Kimi API | Supported | Supported | Anthropic-compatible protocol |
 | Kimi Coding Plan | Supported | Supported | Anthropic-compatible protocol with dedicated auth headers |
 | OpenAI | Supported | Not yet | Chat Completions |
 | Google | Supported | Not yet | Gemini Generative Language API |
-| Zhipu AI | Supported | Supported | Anthropic-compatible protocol |
+| Zhipu AI | Supported | Not yet | OpenAI-compatible protocol |
+| Zhipu Coding Plan | Supported | Supported | Anthropic-compatible protocol |
 | MiniMax | Supported | Supported | Anthropic-compatible protocol |
-| Doubao | Supported | Supported | Anthropic-compatible protocol |
-| Qwen | Supported | Supported | Anthropic-compatible protocol |
-| Custom endpoint | Supported | Not yet | OpenAI-compatible protocol |
+| Doubao | Supported | Not yet | OpenAI-compatible protocol |
+| Qwen | Supported | Not yet | OpenAI-compatible protocol |
+| Qwen Anthropic | Supported | Supported | DashScope Anthropic-compatible protocol |
+| Xiaomi MiMo API | Supported | Supported | Anthropic-compatible protocol |
+| Xiaomi MiMo Token Plan | Supported | Supported | Anthropic-compatible protocol with dedicated auth headers |
+| Custom endpoint | Supported | Not yet | OpenAI-compatible protocol with a user-provided full Chat Completions request URL |
 
 > **Kimi Coding Plan users**: Proma is officially whitelisted by Kimi. Using Proma with your Kimi Coding Plan subscription will not trigger any third-party client ban policy.
 
@@ -143,20 +148,23 @@ Proma is a Bun workspace monorepo.
 proma-v2/
 ├── packages/
 │   ├── shared/     # shared types, IPC constants, config, utilities
+│   ├── session-core/ # Agent session reading, grouping, search, transcript, and rendering core
 │   ├── core/       # Provider Adapters, SSE, code highlighting
 │   └── ui/         # shared React UI components
 └── apps/
     └── electron/   # Electron desktop app
 ```
 
-Current package versions:
+Main workspace packages (versions live in each `package.json`):
 
-| Package | Version | Responsibility |
-| --- | --- | --- |
-| `@proma/electron` | `0.9.12` | Electron desktop app |
-| `@proma/shared` | `0.1.17` | shared types, IPC constants, config, utilities |
-| `@proma/core` | `0.2.9` | Provider Adapters, SSE, Shiki highlighting |
-| `@proma/ui` | `0.1.3` | shared React UI components |
+| Package | Responsibility |
+| --- | --- |
+| `@proma/electron` | Electron desktop app |
+| `@proma/shared` | shared types, IPC constants, config, utilities |
+| `@proma/session-core` | Agent session reading, grouping, search, transcript, and rendering core |
+| `@proma/core` | Provider Adapters, SSE, Shiki highlighting |
+| `@proma/ui` | shared React UI components |
+| `@proma/cli` | session-reading CLI for limited-context consumers |
 
 Common commands:
 
@@ -240,7 +248,7 @@ The Pi SDK runtime is provided by `@earendil-works/pi-coding-agent`, `@earendil-
 When changing packaging configuration, make sure:
 
 - Main-process esbuild keeps `@earendil-works/pi-*` runtime packages external.
-- `apps/electron/scripts/sync-runtime-deps.ts` covers the Pi runtime dependency closure and removes stale `@anthropic-ai/claude-agent-sdk*` packages.
+- `apps/electron/scripts/sync-runtime-deps.ts` rebuilds `apps/electron/node_modules/`, syncs the Pi runtime dependency closure from the allowlist, and checks for stale `@anthropic-ai/claude-agent-sdk*` packages.
 - `apps/electron/electron-builder.yml` packages the synced `node_modules/**/*` and unpacks native addons used by Pi / PDF.js.
 - Ordinary npm dependencies should usually be bundled into `main.cjs` by esbuild instead of being marked external.
 

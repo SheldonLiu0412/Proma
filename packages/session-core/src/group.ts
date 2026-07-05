@@ -71,8 +71,9 @@ export interface AssistantTurn {
   /** 创建时间（取首条 assistant 消息的时间） */
   createdAt?: number
   /**
-   * 该 turn 由后台任务完成通知（task_notification）唤醒后开始。
-   * 用于阻断与前一 turn 的合并，让自动唤醒的新输出独立成块，而不是被追加进上一轮的消息块。
+   * 该 turn 紧跟历史 task_notification 或外部机制补写的通知后开始。
+   * Pi runtime 不再保活等待 task_notification 自动续轮；这里仅用于兼容旧会话或外部补写消息，
+   * 阻断与前一 turn 的合并，避免后续输出被追加进上一轮的消息块。
    */
   startsAfterWake?: boolean
 }
@@ -98,8 +99,8 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
   const hasCompactBoundary = messages.some((msg) => {
     return msg.type === 'system' && (msg as SDKSystemMessage).subtype === 'compact_boundary'
   })
-  // 收到后台任务完成通知（task_notification）后，若没有用户输入就直接出现新的 assistant 输出，
-  // 说明这是自动唤醒的新一轮，应另起独立消息块，而不是续接上一轮。
+  // 收到历史 task_notification / 外部补写通知后，若没有用户输入就直接出现新的 assistant 输出，
+  // 兼容地另起独立消息块，而不是续接上一轮。Pi runtime 本身不会因此保活自动续轮。
   // 注意：不能用 result 做信号——正常对话每轮也以 result 结束，会误伤普通回复。
   let pendingWakeBoundary = false
 
@@ -138,7 +139,7 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
           turnMessages: [msg],
           model: aMsg._channelModelId || aMsg.message?.model || sessionModelId,
           createdAt: meta.createdAt,
-          // 紧跟在后台任务唤醒之后的新 turn：阻断与上一轮的合并
+          // 紧跟在历史通知之后的新 turn：阻断与上一轮的合并
           startsAfterWake: pendingWakeBoundary || undefined,
         }
         pendingWakeBoundary = false
@@ -158,7 +159,7 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
         flushTurn()
         groups.push({ type: 'system', message: sysMsg })
       } else if (sysMsg.subtype === 'task_notification') {
-        // 后台任务完成通知：仅在没有进行中的 turn 时标记唤醒边界（真正的唤醒场景）。
+        // 历史后台任务通知：仅在没有进行中的 turn 时标记边界。
         // 若当前有 turn 正在进行，归入当前 turn 不截断。
         if (currentTurn) {
           currentTurn.turnMessages.push(msg)
@@ -202,7 +203,7 @@ function mergeAdjacentSameModelTurns(groups: MessageGroup[]): MessageGroup[] {
       continue
     }
 
-    // 后台任务唤醒后开始的 turn：独立成块，不向前合并。
+    // 历史通知后开始的 turn：独立成块，不向前合并。
     if (group.startsAfterWake) {
       result.push(group)
       continue

@@ -23,12 +23,12 @@ Bun workspace monorepo：
 ```
 proma-v2/
 ├── packages/
-│   ├── shared/       # 共享类型、IPC 通道常量、配置、工具函数 (v0.1.39)
-│   ├── session-core/ # Agent 会话读取、分组、搜索、Markdown 渲染核心 (v0.1.1)
-│   ├── core/         # AI Provider 适配器、代码高亮服务 (v0.2.13)
-│   └── ui/           # 共享 UI 组件 (CodeBlock, MermaidBlock) (v0.1.9)
+│   ├── shared/       # 共享类型、IPC 通道常量、配置、工具函数
+│   ├── session-core/ # Agent 会话读取、分组、搜索、Markdown 渲染核心
+│   ├── core/         # AI Provider 适配器、代码高亮服务
+│   └── ui/           # 共享 UI 组件 (CodeBlock, MermaidBlock)
 └── apps/
-    └── electron/     # Electron 桌面应用 (v0.14.3)
+    └── electron/     # Electron 桌面应用
         └── src/
             ├── main/       # 主进程 + 服务层 (main/lib/)
             ├── preload/    # IPC 上下文桥接
@@ -39,30 +39,32 @@ proma-v2/
 
 **依赖管理**：package.json 中使用 `workspace:*` 引用内部包
 
+**版本来源**：workspace 包版本以各自 `package.json` 为准，避免在文档中维护易漂移的重复版本号。
+
 ### 包职责详解
 
-#### @proma/shared (v0.1.39)
+#### @proma/shared
 - **导出模块**：`./types`、`./config`、`./utils`、`./constants/permission-rules`
 - **关键类型**：`AgentMessage`、`ChatMessage`、`Channel`、`PermissionRequest`、`FeishuConfig`
 - **依赖**：无运行时依赖（仅 TypeScript）
 
-#### @proma/session-core (v0.1.1)
+#### @proma/session-core
 - **导出模块**：`.`、`./node`
 - **关键功能**：Agent 会话读取、分组、搜索、Markdown 渲染、转录文本生成
 - **依赖**：`@proma/shared`
 
-#### @proma/core (v0.2.13)
+#### @proma/core
 - **导出模块**：`./providers`、`./highlight`、`./types`、`./utils`
 - **关键功能**：Provider 适配器注册表、代码高亮（Shiki）
 - **依赖**：`@proma/shared`、`shiki`
 - **Peer 依赖**：`@modelcontextprotocol/sdk`
 
-#### @proma/ui (v0.1.9)
+#### @proma/ui
 - **关键组件**：共享 React UI 组件库
 - **依赖**：`@proma/core`、`beautiful-mermaid`、`mermaid`、`shiki`
 - **Peer 依赖**：`react@^18.3.0`、`react-dom@^18.3.0`
 
-#### @proma/electron (v0.14.3)
+#### @proma/electron
 - **职责**：Electron 桌面应用主体，集成所有包
 - **关键依赖**：
   - `@earendil-works/pi-coding-agent@0.80.3` - Agent runtime
@@ -228,15 +230,22 @@ bun run generate:icons    # 生成应用图标
 
 | Provider | 适配器 | API 协议 | 特性 |
 |----------|--------|----------|------|
-| **Anthropic** | `anthropic-adapter.ts` | Messages API | extended_thinking、多模态 |
-| **OpenAI** | `openai-adapter.ts` | Chat Completions | 标准 OpenAI 协议 |
-| **DeepSeek** | `anthropic-adapter.ts` | Messages API | Anthropic 兼容 |
-| **智谱 AI** | `openai-adapter.ts` | Chat Completions | OpenAI 兼容 |
-| **MiniMax** | `anthropic-adapter.ts` | Messages API | Anthropic 兼容 |
-| **豆包** | `openai-adapter.ts` | Chat Completions | OpenAI 兼容 |
-| **通义千问** | `openai-adapter.ts` | Chat Completions | OpenAI 兼容 |
-| **Google** | `google-adapter.ts` | Generative Language API | Gemini 系列 |
-| **Custom** | `openai-adapter.ts` | Chat Completions | 自定义 OpenAI 兼容端点 |
+| **Anthropic** | `anthropic-adapter.ts` | Messages API | Chat + Agent，extended_thinking、多模态 |
+| **Anthropic 兼容端点** | `anthropic-adapter.ts` | Messages API | Chat + Agent，用户填写完整 Messages 请求地址 |
+| **OpenAI** | `openai-adapter.ts` | Chat Completions | Chat only，标准 OpenAI 协议 |
+| **DeepSeek** | `anthropic-adapter.ts` | Messages API | Chat + Agent，Anthropic 兼容 |
+| **Kimi API** | `anthropic-adapter.ts` | Messages API | Chat + Agent，Anthropic 兼容 |
+| **Kimi Coding Plan** | `anthropic-adapter.ts` | Messages API | Chat + Agent，专用认证头 |
+| **智谱 AI** | `openai-adapter.ts` | Chat Completions | Chat only，OpenAI 兼容 |
+| **智谱 Coding Plan** | `anthropic-adapter.ts` | Messages API | Chat + Agent，Anthropic 兼容 |
+| **MiniMax** | `anthropic-adapter.ts` | Messages API | Chat + Agent，Anthropic 兼容 |
+| **豆包** | `openai-adapter.ts` | Chat Completions | Chat only，OpenAI 兼容 |
+| **通义千问** | `openai-adapter.ts` | Chat Completions | Chat only，OpenAI 兼容 |
+| **通义千问 (Anthropic 协议)** | `anthropic-adapter.ts` | Messages API | Chat + Agent，DashScope Anthropic 兼容 |
+| **小米 MiMo API** | `anthropic-adapter.ts` | Messages API | Chat + Agent，Anthropic 兼容 |
+| **小米 MiMo Token Plan** | `anthropic-adapter.ts` | Messages API | Chat + Agent，专用认证头 |
+| **Google** | `google-adapter.ts` | Generative Language API | Chat only，Gemini 系列 |
+| **Custom** | `openai-adapter.ts` | Chat Completions | Chat only，自定义 OpenAI 兼容端点 |
 
 #### 多模态支持
 - **图片**：各 Provider 格式不同，适配器自动转换
@@ -324,7 +333,7 @@ bun run generate:icons    # 生成应用图标
 **Pi SDK 打包要求（必须遵守）：**
 - `@earendil-works/pi-coding-agent`、`@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 必须使用 `--external` 排除在 esbuild 打包之外，避免动态资源、provider loader、native/wasm addon 丢失。
 - 打包前必须运行 `bun run sync:runtime-deps`。该脚本从仓库根 `node_modules` 复制 Pi runtime 和 `pdfjs-dist` 的运行时依赖闭包到 `apps/electron/node_modules/`。
-- `sync-runtime-deps.ts` 会在同步前清理、同步后检测 `@anthropic-ai/claude-agent-sdk*`，确保迁移后不把旧 Claude runtime 残留打进安装包。
+- `sync-runtime-deps.ts` 会在同步前重建 `apps/electron/node_modules/`，再按 allowlist 同步 runtime 依赖闭包，并在同步后检测 `@anthropic-ai/claude-agent-sdk*`，确保迁移后不把旧 Claude runtime 残留打进安装包。
 - `electron-builder.yml` 通过 `files: node_modules/**/*` 打包同步后的运行时依赖，并排除 workspace symlink 与开发/构建期大包。
 - `asarUnpack` 必须覆盖 Pi / PDF.js 可能使用的 native addon：`@silvia-odwyer/**`、`@mariozechner/**`、`@napi-rs/**`。
 
@@ -454,7 +463,7 @@ React UI 更新
 
 ### 已实现功能
 
-- ✅ **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Kimi、智谱、MiniMax、豆包、通义千问、Google、自定义端点
+- ✅ **多 Provider 支持**：Anthropic、Anthropic 兼容端点、OpenAI、DeepSeek、Kimi、智谱、MiniMax、豆包、通义千问、通义千问 Anthropic 协议、小米 MiMo、Google、自定义端点
 - ✅ **Agent SDK 集成**：基于 Pi SDK runtime 的完整 Agent 模式
 - ✅ **飞书集成**：消息同步、任务通知、OAuth 认证（68KB 核心服务）
 - ✅ **工作区管理**：多工作区隔离、MCP Server 配置、Skills 管理
