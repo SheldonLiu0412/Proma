@@ -8,6 +8,7 @@
 import {
   type Automation,
   type AutomationScheduleType,
+  type AutomationSessionMode,
   type CreateAutomationInput,
   type UpdateAutomationInput,
 } from '@proma/shared'
@@ -35,6 +36,24 @@ interface AutomationAgentToolContext {
 
 interface AutomationToolResult extends Record<string, unknown> {
   content: Array<{ type: 'text'; text: string }>
+}
+
+interface CreateAutomationToolArgs {
+  name?: string
+  prompt?: string
+  scheduleType?: AutomationScheduleType
+  intervalMinutes?: number
+  timeOfDay?: string
+  dayOfWeek?: number
+  dayOfMonth?: number
+  scheduledAt?: number
+  maxRuns?: number
+  active?: boolean
+  sessionMode?: AutomationSessionMode
+}
+
+interface UpdateAutomationToolArgs extends CreateAutomationToolArgs {
+  id?: string
 }
 
 type TypeBuilder = typeof import('typebox').Type
@@ -229,7 +248,7 @@ export async function buildAutomationAgentTools(
       description: '创建 Proma 持久化定时任务。适合无人值守、有稳定价值的场景：长期反复的周期任务，以及未来某个时间点跑一次的延时任务或跑有限几次就停的任务。',
       parameters: schemas.create,
       async execute(_id, raw) {
-        const args = raw as Partial<CreateAutomationInput>
+        const args = raw as CreateAutomationToolArgs
         if (ctx.triggeredBy === 'automation' || getCurrentAutomationId(ctx)) {
           throw new Error('当前是定时任务自动执行，禁止递归创建新的定时任务；请改用 update_automation 调整当前任务')
         }
@@ -264,10 +283,10 @@ export async function buildAutomationAgentTools(
     defineTool({
       name: 'mcp__automation__update_automation',
       label: 'Update Automation',
-      description: '修改 Proma 定时任务，包括名称、执行提示词、频率、启用状态和权限模式。定时任务自动执行中可以省略 id 来修改当前任务。',
+      description: '修改 Proma 定时任务，包括名称、执行提示词、频率、启用状态和会话模式。定时任务自动执行中可以省略 id 来修改当前任务。',
       parameters: schemas.update,
       async execute(_id, raw) {
-        const args = raw as Partial<UpdateAutomationInput>
+        const args = raw as UpdateAutomationToolArgs
         const id = args.id?.trim() || getCurrentAutomationId(ctx)
         if (!id) throw new Error('id 必填；只有定时任务自动执行中才可以省略 id')
         const input: UpdateAutomationInput = {

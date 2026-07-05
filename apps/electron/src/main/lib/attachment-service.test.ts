@@ -54,7 +54,7 @@ afterAll(() => {
   rmSync(tempHome, { recursive: true, force: true })
 })
 
-describe('附件图片读取安全', () => {
+describe('附件读取与图片分类安全', () => {
   test('Given 附件根目录内的相对图片路径 When 读取附件 Then 返回 base64 内容', () => {
     const data = Buffer.from('fake-image-data').toString('base64')
     const result = service.saveAttachment({
@@ -90,30 +90,52 @@ describe('附件图片读取安全', () => {
     })
 
     expect(result.attachment.localPath.endsWith('.bin')).toBe(true)
+    expect(service.readAttachmentAsBase64(result.attachment.localPath)).toBe(data)
     expect(service.readImageAttachmentAsBase64(result.attachment)).toBe(data)
-    expect(() => service.readAttachmentAsBase64(result.attachment.localPath)).toThrow('只允许读取图片附件')
   })
 
-  test('Given provider 不支持的图片 MIME When 判断图片附件 Then 不进入 vision 图片通道', () => {
-    expect(service.isImageAttachment('image/png')).toBe(true)
-    expect(service.isImageAttachment('image/jpeg')).toBe(true)
-    expect(service.isImageAttachment('image/gif')).toBe(true)
-    expect(service.isImageAttachment('image/webp')).toBe(true)
+  test('Given 图片 MIME When 分类 Then 区分 UI 预览与 vision 发送能力', () => {
+    expect(service.isPreviewableImageAttachment('image/png')).toBe(true)
+    expect(service.isPreviewableImageAttachment('image/svg+xml')).toBe(true)
+    expect(service.isPreviewableImageAttachment('image/bmp')).toBe(true)
+    expect(service.isPreviewableImageAttachment('image/x-icon')).toBe(true)
+    expect(service.isPreviewableImageAttachment('image/vnd.microsoft.icon')).toBe(true)
+
+    expect(service.isVisionImageAttachment('image/png')).toBe(true)
+    expect(service.isVisionImageAttachment('image/jpeg')).toBe(true)
+    expect(service.isVisionImageAttachment('image/gif')).toBe(true)
+    expect(service.isVisionImageAttachment('image/webp')).toBe(true)
+    expect(service.isVisionImageAttachment('image/svg+xml')).toBe(false)
+    expect(service.isVisionImageAttachment('image/bmp')).toBe(false)
+    expect(service.isVisionImageAttachment('image/x-icon')).toBe(false)
+    expect(service.isVisionImageAttachment('image/vnd.microsoft.icon')).toBe(false)
+
     expect(service.isImageAttachment('image/svg+xml')).toBe(false)
-    expect(service.isImageAttachment('image/bmp')).toBe(false)
-    expect(service.isImageAttachment('image/x-icon')).toBe(false)
   })
 
-  test('Given svg/bmp/ico 附件 When 按图片读取 Then 拒绝进入 vision 图片通道', () => {
+  test('Given svg/bmp/ico 附件 When 通用读取 Then 返回内容但拒绝进入 vision 图片通道', () => {
     const dir = join(attachmentsRoot(), 'conversation-non-vision-images')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'vector.svg'), '<svg />')
     writeFileSync(join(dir, 'bitmap.bmp'), 'bitmap')
     writeFileSync(join(dir, 'icon.ico'), 'icon')
 
-    expect(() => service.readAttachmentAsBase64('conversation-non-vision-images/vector.svg')).toThrow('只允许读取图片附件')
-    expect(() => service.readAttachmentAsBase64('conversation-non-vision-images/bitmap.bmp')).toThrow('只允许读取图片附件')
-    expect(() => service.readAttachmentAsBase64('conversation-non-vision-images/icon.ico')).toThrow('只允许读取图片附件')
+    expect(service.readAttachmentAsBase64('conversation-non-vision-images/vector.svg')).toBe(Buffer.from('<svg />').toString('base64'))
+    expect(service.readAttachmentAsBase64('conversation-non-vision-images/bitmap.bmp')).toBe(Buffer.from('bitmap').toString('base64'))
+    expect(service.readAttachmentAsBase64('conversation-non-vision-images/icon.ico')).toBe(Buffer.from('icon').toString('base64'))
+
+    expect(() => service.readImageAttachmentAsBase64({
+      localPath: 'conversation-non-vision-images/vector.svg',
+      mediaType: 'image/svg+xml',
+    })).toThrow('只允许读取图片附件')
+    expect(() => service.readImageAttachmentAsBase64({
+      localPath: 'conversation-non-vision-images/bitmap.bmp',
+      mediaType: 'image/bmp',
+    })).toThrow('只允许读取图片附件')
+    expect(() => service.readImageAttachmentAsBase64({
+      localPath: 'conversation-non-vision-images/icon.ico',
+      mediaType: 'image/x-icon',
+    })).toThrow('只允许读取图片附件')
   })
 
   test('Given 历史 .bin 但 MIME 不是 vision 支持格式 When 读取图片 Then 拒绝读取', () => {
@@ -158,12 +180,12 @@ describe('附件图片读取安全', () => {
     )
   })
 
-  test('Given 附件根目录内的非图片文件 When 读取附件 Then 拒绝读取', () => {
+  test('Given 附件根目录内的非图片文件 When 通用读取 Then 返回 base64 内容', () => {
     const noteDir = join(attachmentsRoot(), 'conversation-b')
     mkdirSync(noteDir, { recursive: true })
     writeFileSync(join(noteDir, 'note.txt'), 'plain text')
 
-    expect(() => service.readAttachmentAsBase64('conversation-b/note.txt')).toThrow('只允许读取图片附件')
+    expect(service.readAttachmentAsBase64('conversation-b/note.txt')).toBe(Buffer.from('plain text').toString('base64'))
   })
 
   test('Given 空附件路径 When 读取附件 Then 拒绝读取', () => {

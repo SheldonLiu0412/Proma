@@ -24,7 +24,7 @@ import {
 import type { ImageAttachmentData, ContinuationMessage } from '@proma/core'
 import { listChannels, decryptApiKey } from './channel-manager'
 import { appendMessage, updateConversationMeta, getConversationMessages } from './conversation-manager'
-import { readImageAttachmentAsBase64, isImageAttachment } from './attachment-service'
+import { readImageAttachmentAsBase64, isVisionImageAttachment } from './attachment-service'
 import { extractTextFromAttachment, isDocumentAttachment } from './document-parser'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
@@ -49,7 +49,7 @@ function getImageAttachmentData(attachments?: FileAttachment[]): ImageAttachment
   if (!attachments || attachments.length === 0) return []
 
   return attachments
-    .filter((att) => isImageAttachment(att.mediaType))
+    .filter((att) => isVisionImageAttachment(att.mediaType))
     .map((att) => ({
       mediaType: att.mediaType,
       data: readImageAttachmentAsBase64(att),
@@ -82,7 +82,7 @@ async function enrichMessageWithDocuments(
 
   for (const att of docAttachments) {
     try {
-      const text = await extractTextFromAttachment(att.localPath)
+      const text = await extractTextFromAttachment(att.localPath, att.mediaType)
       if (text.trim()) {
         parts.push(`\n<file name="${att.filename}">\n${text}\n</file>`)
       } else {

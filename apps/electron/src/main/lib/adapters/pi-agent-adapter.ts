@@ -91,7 +91,6 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   piAgentDir: string
   piSessionDir: string
   customTools?: ToolDefinition[]
-  onStderr?: (data: string) => void
   onSessionId?: (sdkSessionId: string) => void
   onModelResolved?: (model: string) => void
   onContextWindow?: (contextWindow: number) => void
@@ -123,6 +122,7 @@ interface ActivePiSession {
   interruptAbortPromise?: Promise<void>
   readySettled: boolean
   disposed: boolean
+  runtimeGuard?: AgentRuntimeGuard
 }
 
 interface PromaTaskItem {
@@ -487,19 +487,6 @@ export function mapSDKErrorToTypedError(errorCode: string, message: string, orig
     retryDelayMs: meta.canRetry ? 1000 : undefined,
     originalError,
   }
-}
-
-/**
- * 是否在 result 到达后保留消息通道等待续轮。
- *
- * Pi 是 in-process runtime，没有"本轮结束但后台任务/定时任务仍在飞行"的 terminal reason
- * （Claude SDK 时代靠 CONTINUABLE_TERMINAL_REASONS + Stop hook 观察 background_tasks 实现）。
- * Pi 的 bash 工具不支持 run_in_background，AgentSessionEvent 也无对应续轮事件，
- * 故本适配器永远返回 false —— 这是 pi 架构下的**永久桩**，不是待补的遗漏。
- * orchestrator 侧的 keepChannelOpen 分支因此不会命中，作为向后兼容的扩展点保留。
- */
-export function shouldKeepChannelOpen(_terminalReason?: string): boolean {
-  return false
 }
 
 function normalizePiApi(provider: ProviderType): Api {
@@ -1630,7 +1617,7 @@ function wrapCustomToolDefinitions(
     wrapToolWithPermission(tool as unknown as ToolDefinition<TSchema, unknown, unknown>, { canUseTool }) as ToolDefinition)
 }
 
-function installRuntimeGuardHooks(session: AgentSession, guard: AgentRuntimeGuard): void {
+export function installRuntimeGuardHooks(session: AgentSession, guard: AgentRuntimeGuard): void {
   const previousAfterToolCall = session.agent.afterToolCall
   session.agent.afterToolCall = async (context, signal) => {
     const previousResult = await previousAfterToolCall?.(context, signal)
@@ -1650,6 +1637,17 @@ function installRuntimeGuardHooks(session: AgentSession, guard: AgentRuntimeGuar
       terminate: guardedResult.terminate,
     }
   }
+
+  const previousPrepareNextTurnWithContext = session.agent.prepareNextTurnWithContext
+  session.agent.prepareNextTurnWithContext = async (context, signal) => {
+    const previousSnapshot = await previousPrepareNextTurnWithContext?.(context, signal)
+    if (guard.shouldStopBeforeNextTurn()) {
+      // Pi 的 steer/follow-up 队列在 turn 完成后才 drain；达到 Proma 上限时必须在这里清空，
+      // 否则纯文本 turn 之后追加的队列消息会绕过 afterToolCall 继续进入下一轮。
+      session.agent.clearAllQueues()
+    }
+    return previousSnapshot
+  }
 }
 
 export class PiAgentAdapter implements AgentProviderAdapter {
@@ -1660,6 +1658,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     this.activeSessions.set(input.sessionId, active)
     const queue = createAsyncQueue<SDKMessage>()
     const runtimeGuard = createAgentRuntimeGuard(input)
+    active.runtimeGuard = runtimeGuard
     let unsubscribe: (() => void) | undefined
 
     const cleanupActiveSession = (): void => {
@@ -1710,6 +1709,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               preparePromptWithSkills: preparePromptWithPromaSkills,
               thinkingLevel: thinkingLevelFromOptions(input.thinking, input.effort),
               runtimeGuard,
+              installRuntimeGuardHooks,
             })]
           : []),
       ]
@@ -1921,6 +1921,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         const runPromptChain = async (): Promise<void> => {
           let nextPrompt: string | undefined = appendOutputFormatInstruction(input.prompt, input.outputFormat)
           while (nextPrompt !== undefined) {
+            if (runtimeGuard.shouldStopBeforeNextTurn()) {
+              active.pendingInterruptPrompts.length = 0
+              return
+            }
             const prompt = await preparePromptWithPromaSkills(resourceLoader, nextPrompt, input.skillMentions)
             nextPrompt = undefined
             try {
@@ -1932,6 +1936,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               active.interrupting = false
             }
             if (active.abortRequested) return
+            if (runtimeGuard.shouldStopBeforeNextTurn()) {
+              active.pendingInterruptPrompts.length = 0
+              return
+            }
             nextPrompt = active.pendingInterruptPrompts.shift()
           }
         }
@@ -1974,9 +1982,19 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     if (!active) throw new Error('当前会话没有正在运行的 Agent')
     const session = await waitForActiveSession(active)
     if (active.abortRequested) throw createAbortError()
+    if (active.runtimeGuard?.shouldStopBeforeNextTurn()) {
+      session.agent.clearAllQueues()
+      const stopOverride = active.runtimeGuard.getLimitResultOverride()
+      throw new Error(stopOverride?.errors[0] ?? 'Agent 已达到运行限制，无法继续追加消息')
+    }
     const content = active.resourceLoader
       ? await preparePromptWithPromaSkills(active.resourceLoader, message.message.content, options?.skillMentions)
       : message.message.content
+    if (active.runtimeGuard?.shouldStopBeforeNextTurn()) {
+      session.agent.clearAllQueues()
+      const stopOverride = active.runtimeGuard.getLimitResultOverride()
+      throw new Error(stopOverride?.errors[0] ?? 'Agent 已达到运行限制，无法继续追加消息')
+    }
     if (options?.interrupt) {
       active.pendingInterruptPrompts.push(content)
       if (session.isStreaming) {

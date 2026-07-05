@@ -12,15 +12,17 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unl
 import { createInterface } from 'node:readline'
 import { writeJsonFileAtomic, readJsonFileSafe } from './safe-file'
 import { randomUUID } from 'node:crypto'
-import { join, resolve, dirname } from 'node:path'
+import { isAbsolute, join, relative, resolve, dirname } from 'node:path'
 import {
   getAgentSessionsIndexPath,
   getAgentSessionsDir,
   getAgentSessionMessagesPath,
   getAgentSessionWorkspacePath,
   getAgentWorkspacePath,
+  getSdkConfigDir,
+  resolveWorkspaceFilesDir,
 } from './config-paths'
-import { getAgentWorkspace } from './agent-workspace-manager'
+import { getAgentWorkspace, listAgentWorkspaces } from './agent-workspace-manager'
 import type {
   AgentSessionMeta,
   AgentMessage,
@@ -105,6 +107,17 @@ function normalizePersistedSDKMessage(parsed: unknown): SDKMessage {
     return convertLegacyMessage(parsed as AgentMessage)
   }
   return parsed as SDKMessage
+}
+
+function uniqueNonEmpty(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0))]
+}
+
+function isPathInsideOrEqual(parent: string, child: string): boolean {
+  const resolvedParent = resolve(parent)
+  const resolvedChild = resolve(child)
+  const rel = relative(resolvedParent, resolvedChild)
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel))
 }
 
 function migrateLegacyPermissionMode(index: AgentSessionsIndex): boolean {
@@ -289,13 +302,14 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
   const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
   const truncationThreshold = MAX_SDK_MESSAGE_LENGTH / 2
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const clone: any = JSON.parse(JSON.stringify(msg))
-  const content = clone.message?.content
+  const clone = JSON.parse(JSON.stringify(msg)) as unknown
+  if (!isMutableRecord(clone)) return msg
+
+  const content = asMutableRecord(clone.message)?.content
   if (Array.isArray(content)) {
     for (let i = 0; i < content.length; i++) {
       const block = content[i]
-      if (!block || typeof block !== 'object') continue
+      if (!isMutableRecord(block)) continue
 
       // 截断超长 text block
       if (block.type === 'text' && typeof block.text === 'string' && block.text.length > truncationThreshold) {
@@ -317,12 +331,14 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
         }
         // 剥离 base64 图片数据
         if (Array.isArray(block.content)) {
-          block.content = block.content.map((item: Record<string, unknown>) => {
-            if (item?.type === 'image' && (item.source as Record<string, unknown>)?.data) {
-              const dataLen = String((item.source as Record<string, unknown>).data).length
+          block.content = block.content.map((item: unknown) => {
+            if (!isMutableRecord(item)) return item
+            const source = asMutableRecord(item.source)
+            if (item.type === 'image' && source?.data) {
+              const dataLen = String(source.data).length
               return { type: 'image', _truncated: true, _originalLength: dataLen }
             }
-            if (item?.type === 'image' && typeof item.data === 'string') {
+            if (item.type === 'image' && typeof item.data === 'string') {
               return {
                 type: 'image',
                 mimeType: item.mimeType,
@@ -338,11 +354,24 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
   }
 
   // 截断 error.message
-  if (clone.error && typeof clone.error === 'object' && typeof clone.error.message === 'string' && clone.error.message.length > truncationThreshold) {
-    clone.error.message = clone.error.message.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
+  const error = asMutableRecord(clone.error)
+  if (error && typeof error.message === 'string' && error.message.length > truncationThreshold) {
+    error.message = error.message.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
   }
 
   return clone as SDKMessage
+}
+
+interface MutableRecord {
+  [key: string]: unknown
+}
+
+function isMutableRecord(value: unknown): value is MutableRecord {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function asMutableRecord(value: unknown): MutableRecord | undefined {
+  return isMutableRecord(value) ? value : undefined
 }
 
 /**
@@ -466,6 +495,100 @@ export function deleteAgentSession(id: string): void {
     console.log(`[Agent 会话] 保留 sidecar 快照目录（仍被 fork 子会话引用）: ${id}`)
   }
 
+  cleanupUnreferencedSdkRuntimeData(removed, index.sessions)
+}
+
+function collectSdkSessionIdsFromMeta(session: AgentSessionMeta): string[] {
+  return uniqueNonEmpty([
+    session.sdkSessionId,
+    session.legacySdkSessionId,
+    session.forkSourceSdkSessionId,
+  ])
+}
+
+function cleanupUnreferencedSdkRuntimeData(removed: AgentSessionMeta, remainingSessions: AgentSessionMeta[]): void {
+  const removedSdkSessionIds = collectSdkSessionIdsFromMeta(removed)
+  if (removedSdkSessionIds.length === 0) return
+
+  const referencedSdkSessionIds = new Set<string>()
+  for (const session of remainingSessions) {
+    for (const sdkSessionId of collectSdkSessionIdsFromMeta(session)) {
+      referencedSdkSessionIds.add(sdkSessionId)
+    }
+  }
+
+  const sdkConfigDir = getSdkConfigDir()
+  for (const sdkSessionId of removedSdkSessionIds) {
+    if (referencedSdkSessionIds.has(sdkSessionId)) {
+      console.log(`[Agent 会话] 保留 SDK runtime 数据（仍被其它会话引用）: ${sdkSessionId}`)
+      continue
+    }
+
+    cleanupLegacyFileHistoryDir(sdkConfigDir, sdkSessionId)
+    cleanupLegacyProjectSessionFiles(sdkConfigDir, sdkSessionId)
+    cleanupRuntimeSessionFiles(sdkConfigDir, sdkSessionId)
+  }
+}
+
+function cleanupLegacyFileHistoryDir(sdkConfigDir: string, sdkSessionId: string): void {
+  const histDir = join(sdkConfigDir, 'file-history', sdkSessionId)
+  if (!existsSync(histDir)) return
+  try {
+    rmSync(histDir, { recursive: true, force: true })
+    console.log(`[Agent 会话] 已清理 legacy file-history: ${sdkSessionId}`)
+  } catch (error) {
+    console.warn(`[Agent 会话] 清理 legacy file-history 失败 (${sdkSessionId}):`, error)
+  }
+}
+
+function cleanupLegacyProjectSessionFiles(sdkConfigDir: string, sdkSessionId: string): void {
+  const projectsDir = join(sdkConfigDir, 'projects')
+  if (!existsSync(projectsDir)) return
+
+  try {
+    for (const hashDir of readdirSync(projectsDir)) {
+      const projectPath = join(projectsDir, hashDir)
+      const sessionFile = join(projectPath, `${sdkSessionId}.jsonl`)
+      if (existsSync(sessionFile)) {
+        try {
+          unlinkSync(sessionFile)
+          console.log(`[Agent 会话] 已清理 legacy SDK project JSONL: ${sessionFile}`)
+        } catch (error) {
+          console.warn(`[Agent 会话] 清理 legacy SDK project JSONL 失败 (${sessionFile}):`, error)
+        }
+      }
+
+      try {
+        if (existsSync(projectPath) && readdirSync(projectPath).length === 0) {
+          rmSync(projectPath, { recursive: true, force: true })
+        }
+      } catch {
+        // 忽略单个 project 目录的清理失败
+      }
+    }
+  } catch (error) {
+    console.warn(`[Agent 会话] 遍历 legacy SDK projects 失败 (${sdkSessionId}):`, error)
+  }
+}
+
+function cleanupRuntimeSessionFiles(sdkConfigDir: string, sdkSessionId: string): void {
+  const sessionsDir = join(sdkConfigDir, 'sessions')
+  if (!existsSync(sessionsDir)) return
+
+  try {
+    for (const file of readdirSync(sessionsDir)) {
+      if (!file.endsWith('.jsonl') || !file.includes(sdkSessionId)) continue
+      const sessionFile = join(sessionsDir, file)
+      try {
+        unlinkSync(sessionFile)
+        console.log(`[Agent 会话] 已清理 runtime session JSONL: ${sessionFile}`)
+      } catch (error) {
+        console.warn(`[Agent 会话] 清理 runtime session JSONL 失败 (${sessionFile}):`, error)
+      }
+    }
+  } catch (error) {
+    console.warn(`[Agent 会话] 遍历 runtime sessions 失败 (${sdkSessionId}):`, error)
+  }
 }
 
 /**
@@ -626,9 +749,11 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
   // 2.5 校验目标消息；若目标是子代理输出，自动回溯到最近的主线 assistant。
   let effectiveUpToMessageUuid = upToMessageUuid
   const displayUpToMessageUuid = upToMessageUuid
+  let effectiveSourceSdkSessionId: string | undefined
   if (upToMessageUuid) {
     const forkTarget = await resolveForkTargetFromStoredMessages(sessionId, upToMessageUuid)
     effectiveUpToMessageUuid = forkTarget.effectiveUpToMessageUuid
+    effectiveSourceSdkSessionId = forkTarget.effectiveSdkSessionId
 
     if (forkTarget.usedSidechainFallback) {
       console.log(
@@ -646,13 +771,18 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     forkModelId,
   )
 
+  const legacySdkSessionIds = collectLegacySdkSessionIds(sourceMeta, effectiveSourceSdkSessionId)
+  const forkSourceSdkSessionId = legacySdkSessionIds[0]
+
   updateAgentSessionMeta(newMeta.id, {
     forkSourceDir: sourceDir,
     forkSourceSessionId: sessionId,
+    forkSourceSdkSessionId,
   })
   // 同步返回值（updateAgentSessionMeta 已写入磁盘，这里让调用方拿到最新值）
   newMeta.forkSourceDir = sourceDir
   newMeta.forkSourceSessionId = sessionId
+  newMeta.forkSourceSdkSessionId = forkSourceSdkSessionId
 
   // 4. 计算 fork 目标会话的 cwd（新会话目录），后续多个步骤需要用到
   let destDir: string | undefined
@@ -676,6 +806,7 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
           upToMessageUuid: effectiveUpToMessageUuid,
           sourceDir,
           destDir,
+          legacySdkSessionIds,
         })
       }
       if (!materializedFromSidecar) {
@@ -717,32 +848,61 @@ interface ForkTargetResolution {
   usedSidechainFallback: boolean
 }
 
+function collectLegacySdkSessionIds(meta: AgentSessionMeta, messageSdkSessionId?: string): string[] {
+  return uniqueNonEmpty([
+    messageSdkSessionId,
+    meta.legacySdkSessionId,
+    meta.forkSourceSdkSessionId,
+    meta.sdkSessionId,
+  ])
+}
+
 async function materializeForkWorkspaceFromSidecar(input: {
   sourceSessionId: string
   upToMessageUuid?: string
   sourceDir?: string
   destDir?: string
+  legacySdkSessionIds?: string[]
 }): Promise<boolean> {
-  const { sourceSessionId, upToMessageUuid, sourceDir, destDir } = input
+  const { sourceSessionId, upToMessageUuid, sourceDir, destDir, legacySdkSessionIds = [] } = input
   if (!sourceDir || !destDir || !upToMessageUuid) return false
 
   const sourceRoot = resolve(sourceDir)
   const destRoot = resolve(destDir)
-  const rootPathMap = new Map([[sourceRoot, destRoot]])
-  let rewindUserUuid: string | undefined
+  const rootPathMap = buildForkRestoreRootPathMap(sourceRoot, destRoot)
+  let rewindPoint: PromaRewindPoint
   try {
-    rewindUserUuid = resolveRewindUserMessageUuid(sourceSessionId, upToMessageUuid)
+    rewindPoint = resolvePromaRewindPoint(sourceSessionId, upToMessageUuid)
   } catch (error) {
-    console.warn(`[Agent 会话] fork 解析 sidecar 快照点失败，回退为复制当前工作区:`, error)
-    return false
+    try {
+      return materializeForkWorkspaceFromLegacy({
+        legacySdkSessionIds,
+        assistantMessageUuid: upToMessageUuid,
+        sourceRoot,
+        destRoot,
+        rootPathMap,
+        allowCurrentWorkspaceCopy: false,
+        missingReason: 'Proma JSONL 解析失败',
+      })
+    } catch (legacyError) {
+      throw new Error(
+        `无法安全分叉旧历史点：Proma JSONL 解析失败，legacy Claude file-history fallback 也不可用。`
+        + `请回退到最后一轮或保留当前会话继续。详情: ${legacyError instanceof Error ? legacyError.message : String(error)}`,
+      )
+    }
   }
-  const isLastTurn = rewindUserUuid === '__LAST_TURN__'
-  const snapshotUuid = rewindUserUuid === '__LAST_TURN__'
-    ? upToMessageUuid
-    : rewindUserUuid
+
+  const snapshotUuid = rewindPoint.isLastTurn ? upToMessageUuid : rewindPoint.snapshotUuid
   if (!snapshotUuid) {
-    console.warn('[Agent 会话] 无法解析 fork 目标对应的 Proma sidecar 快照，回退为复制当前工作区')
-    return false
+    return materializeForkWorkspaceFromLegacy({
+      legacySdkSessionIds,
+      assistantMessageUuid: upToMessageUuid,
+      sourceRoot,
+      destRoot,
+      rootPathMap,
+      allowCurrentWorkspaceCopy: rewindPoint.isLastTurn,
+      missingReason: '无法解析 fork 目标对应的 Proma sidecar 快照 UUID',
+    })
   }
 
   const result = await restoreAgentSidecarSnapshot(sourceSessionId, snapshotUuid, {
@@ -751,18 +911,105 @@ async function materializeForkWorkspaceFromSidecar(input: {
     restoreUnmappedRoots: false,
   })
   if (!result.canRewind) {
-    if (isLastTurn || isMissingSidecarError(result.error)) {
-      console.warn(`[Agent 会话] fork 快照不可用，回退为复制当前工作区: ${result.error ?? '未知错误'}`)
+    if (isMissingSidecarError(result.error)) {
+      return materializeForkWorkspaceFromLegacy({
+        legacySdkSessionIds,
+        assistantMessageUuid: upToMessageUuid,
+        sourceRoot,
+        destRoot,
+        rootPathMap,
+        allowCurrentWorkspaceCopy: rewindPoint.isLastTurn,
+        missingReason: result.error ?? 'Proma sidecar 快照不可用',
+      })
+    }
+    if (rewindPoint.isLastTurn) {
+      console.warn(`[Agent 会话] fork 最后一轮 sidecar 不可用，回退为复制当前工作区: ${result.error ?? '未知错误'}`)
       return false
     }
     throw new Error(result.error ?? '无法从 Proma sidecar 物化 fork 工作目录')
   }
   if ((result.restoredRoots ?? 0) === 0) {
-    console.warn('[Agent 会话] fork 快照没有可物化的工作区 root，回退为复制当前工作区')
-    return false
+    return materializeForkWorkspaceFromLegacy({
+      legacySdkSessionIds,
+      assistantMessageUuid: upToMessageUuid,
+      sourceRoot,
+      destRoot,
+      rootPathMap,
+      allowCurrentWorkspaceCopy: rewindPoint.isLastTurn,
+      missingReason: 'fork 快照没有可物化的工作区 root',
+    })
   }
   console.log(`[Agent 会话] 已从 sidecar 物化 fork 工作区: ${sourceRoot} → ${destRoot}, snapshot=${snapshotUuid}`)
   return true
+}
+
+function buildForkRestoreRootPathMap(sourceRoot: string, destRoot: string): Map<string, string> {
+  const rootPathMap = new Map<string, string>([[resolve(sourceRoot), resolve(destRoot)]])
+  const workspaceRootMap = buildWorkspaceFilesRootPathMap()
+  for (const [source, target] of workspaceRootMap) {
+    rootPathMap.set(source, target)
+  }
+  return rootPathMap
+}
+
+function buildWorkspaceFilesRootPathMap(targetWorkspaceSlug?: string): Map<string, string> {
+  const map = new Map<string, string>()
+  const targetWorkspaceFiles = targetWorkspaceSlug ? resolve(resolveWorkspaceFilesDir(targetWorkspaceSlug)) : undefined
+  for (const workspace of listAgentWorkspaces()) {
+    const sourceWorkspaceFiles = resolve(resolveWorkspaceFilesDir(workspace.slug))
+    map.set(sourceWorkspaceFiles, targetWorkspaceFiles ?? sourceWorkspaceFiles)
+  }
+  return map
+}
+
+function getMappedWorkspaceFileTargets(rootPathMap: Map<string, string>): string[] {
+  const workspaceFileRoots = new Set(listAgentWorkspaces().map((workspace) => resolve(resolveWorkspaceFilesDir(workspace.slug))))
+  return uniqueNonEmpty([...rootPathMap].map(([source, target]) => workspaceFileRoots.has(source) ? target : undefined))
+}
+
+function materializeForkWorkspaceFromLegacy(input: {
+  legacySdkSessionIds: string[]
+  assistantMessageUuid: string
+  sourceRoot: string
+  destRoot: string
+  rootPathMap: Map<string, string>
+  allowCurrentWorkspaceCopy: boolean
+  missingReason: string
+}): boolean {
+  const copyResult = copyForkWorkspaceFiles(input.sourceRoot, input.destRoot)
+  console.log(
+    `[Agent 会话] legacy fallback 先复制当前工作区作为恢复基线: ${input.sourceRoot} → ${input.destRoot} `
+    + `(${copyResult.copiedCount} 个条目, 跳过 ${copyResult.skippedCount} 个, 失败 ${copyResult.failedCount} 个)`,
+  )
+
+  const legacyResult = rewindFilesFromLegacySnapshot({
+    sdkSessionIds: input.legacySdkSessionIds,
+    assistantMessageUuid: input.assistantMessageUuid,
+    cwd: input.destRoot,
+    rootPathMap: input.rootPathMap,
+    allowedDirectories: [input.destRoot, ...getMappedWorkspaceFileTargets(input.rootPathMap)],
+  })
+
+  if (legacyResult.canRewind) {
+    console.log(`[Agent 会话] 已从 legacy Claude file-history 物化 fork 工作区: snapshot=${legacyResult.resolvedUserMessageUuid ?? 'unknown'}`)
+    return true
+  }
+
+  if (input.allowCurrentWorkspaceCopy && isLegacyLastTurnResult(legacyResult)) {
+    console.warn(`[Agent 会话] fork 目标是最后一轮，legacy file-history 无需恢复，已使用当前工作区副本: ${input.missingReason}`)
+    return true
+  }
+
+  if (input.allowCurrentWorkspaceCopy && input.legacySdkSessionIds.length === 0) {
+    console.warn(`[Agent 会话] fork 目标是最后一轮且无 legacy SDK session，已使用当前工作区副本: ${input.missingReason}`)
+    return true
+  }
+
+  throw new Error(
+    `无法安全分叉旧历史点：${input.missingReason}，legacy Claude file-history fallback 也不可用。`
+    + `为避免“历史停在旧 turn、文件却是最新态”，本次 fork 已取消。`
+    + `详情: ${legacyResult.error ?? '未找到 legacy file-history-snapshot'}`,
+  )
 }
 
 function isMissingSidecarError(error?: string): boolean {
@@ -1052,11 +1299,49 @@ export function truncateSDKMessages(id: string, upToUuidInclusive: string): SDKM
   return kept
 }
 
-function isRealStoredUserMessage(message: SDKMessage): boolean {
-  if (message.type !== 'user' || !getStoredMessageUuid(message)) return false
+function isRealStoredUserTurn(message: SDKMessage): boolean {
+  if (message.type !== 'user') return false
   const content = (message as { message?: { content?: Array<{ type: string }> } }).message?.content
   const hasToolResult = Array.isArray(content) && content.some((block) => block.type === 'tool_result')
   return !hasToolResult
+}
+
+interface PromaRewindPoint {
+  isLastTurn: boolean
+  snapshotUuid?: string
+}
+
+function resolvePromaRewindPoint(
+  sessionId: string,
+  assistantMessageUuid: string,
+): PromaRewindPoint {
+  const filePath = getAgentSessionMessagesPath(sessionId)
+  if (!existsSync(filePath)) return { isLastTurn: false }
+
+  const raw = readFileSync(filePath, 'utf-8')
+  const lines = raw.split('\n').filter((line) => line.trim())
+  const messages = parseJsonlStrict<unknown>(lines, `rewind 解析 Proma JSONL (${sessionId})`).map(normalizePersistedSDKMessage)
+  const assistantIdx = messages.findIndex((message) => getStoredMessageUuid(message) === assistantMessageUuid)
+  if (assistantIdx < 0) {
+    console.warn(`[Agent 会话] Proma JSONL 中未找到 assistant uuid=${assistantMessageUuid}`)
+    return { isLastTurn: false }
+  }
+
+  for (let i = assistantIdx + 1; i < messages.length; i++) {
+    const message = messages[i]!
+    if (isRealStoredUserTurn(message)) {
+      const uuid = getStoredMessageUuid(message)
+      if (!uuid) {
+        console.warn(`[Agent 会话] 回退解析到下一轮 user，但该历史消息缺少 Proma uuid (assistant uuid=${assistantMessageUuid})`)
+        return { isLastTurn: false }
+      }
+      console.log(`[Agent 会话] 回退解析到下一轮 user uuid=${uuid} (assistant uuid=${assistantMessageUuid})`)
+      return { isLastTurn: false, snapshotUuid: uuid }
+    }
+  }
+
+  console.log(`[Agent 会话] 回退目标是最后一个 turn，无需恢复文件 (assistant uuid=${assistantMessageUuid})`)
+  return { isLastTurn: true }
 }
 
 /**
@@ -1071,29 +1356,343 @@ export function resolveRewindUserMessageUuid(
   sessionId: string,
   assistantMessageUuid: string,
 ): string | undefined {
-  const filePath = getAgentSessionMessagesPath(sessionId)
-  if (!existsSync(filePath)) return undefined
+  const rewindPoint = resolvePromaRewindPoint(sessionId, assistantMessageUuid)
+  if (rewindPoint.isLastTurn) return '__LAST_TURN__'
+  return rewindPoint.snapshotUuid
+}
 
-  const raw = readFileSync(filePath, 'utf-8')
-  const lines = raw.split('\n').filter((line) => line.trim())
-  const messages = parseJsonlStrict<unknown>(lines, `rewind 解析 Proma JSONL (${sessionId})`).map(normalizePersistedSDKMessage)
-  const assistantIdx = messages.findIndex((message) => getStoredMessageUuid(message) === assistantMessageUuid)
-  if (assistantIdx < 0) {
-    console.warn(`[Agent 会话] Proma JSONL 中未找到 assistant uuid=${assistantMessageUuid}`)
-    return undefined
-  }
+interface LegacyUserUuidResolution {
+  sdkSessionId: string
+  userMessageUuid: string
+  lastTurn: boolean
+}
 
-  for (let i = assistantIdx + 1; i < messages.length; i++) {
-    const message = messages[i]!
-    if (isRealStoredUserMessage(message)) {
-      const uuid = getStoredMessageUuid(message)
-      console.log(`[Agent 会话] 回退解析到下一轮 user uuid=${uuid} (assistant uuid=${assistantMessageUuid})`)
-      return uuid
+export interface LegacyFileHistoryRestoreResult {
+  canRewind: boolean
+  error?: string
+  filesChanged?: string[]
+  resolvedSdkSessionId?: string
+  resolvedUserMessageUuid?: string
+  lastTurn?: boolean
+}
+
+interface LegacyFileHistoryRestoreInput {
+  sdkSessionIds: string[]
+  cwd: string
+  assistantMessageUuid?: string
+  userMessageUuid?: string
+  rootPathMap?: Map<string, string>
+  allowedDirectories?: string[]
+  projectDir?: string
+}
+
+interface LegacyTrackedFileBackup {
+  backupFileName: string | null
+}
+
+interface LegacyFileHistorySnapshot {
+  messageId?: string
+  trackedFileBackups?: Record<string, LegacyTrackedFileBackup>
+}
+
+function isLegacyLastTurnResult(result: LegacyFileHistoryRestoreResult): boolean {
+  return result.lastTurn === true
+}
+
+function getRecordString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function isLegacyRealUserMessage(record: Record<string, unknown>): boolean {
+  if (record.type !== 'user' || typeof record.uuid !== 'string') return false
+  const message = record.message
+  const content = message && typeof message === 'object'
+    ? (message as { content?: unknown }).content
+    : undefined
+  const hasToolResult = Array.isArray(content)
+    && content.some((block) => Boolean(block && typeof block === 'object' && (block as { type?: unknown }).type === 'tool_result'))
+  return !hasToolResult
+}
+
+function parseLegacySnapshot(value: unknown): LegacyFileHistorySnapshot | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const snapshot = value as { messageId?: unknown; trackedFileBackups?: unknown }
+  const trackedFileBackups: Record<string, LegacyTrackedFileBackup> = {}
+  if (snapshot.trackedFileBackups && typeof snapshot.trackedFileBackups === 'object') {
+    for (const [filePath, rawInfo] of Object.entries(snapshot.trackedFileBackups as Record<string, unknown>)) {
+      if (!rawInfo || typeof rawInfo !== 'object') continue
+      const backupFileName = (rawInfo as { backupFileName?: unknown }).backupFileName
+      if (typeof backupFileName === 'string' || backupFileName === null) {
+        trackedFileBackups[filePath] = { backupFileName }
+      }
     }
   }
 
-  console.log(`[Agent 会话] 回退目标是最后一个 turn，无需恢复文件 (assistant uuid=${assistantMessageUuid})`)
-  return '__LAST_TURN__'
+  return {
+    messageId: typeof snapshot.messageId === 'string' ? snapshot.messageId : undefined,
+    trackedFileBackups,
+  }
+}
+
+function findLegacySdkSessionJsonl(sdkSessionId: string, _projectDir?: string): string | undefined {
+  const sdkConfigDir = getSdkConfigDir()
+
+  const projectsDir = join(sdkConfigDir, 'projects')
+  if (existsSync(projectsDir)) {
+    for (const dir of readdirSync(projectsDir)) {
+      const candidate = join(projectsDir, dir, `${sdkSessionId}.jsonl`)
+      if (existsSync(candidate)) return candidate
+    }
+  }
+
+  const sessionsDir = join(sdkConfigDir, 'sessions')
+  if (existsSync(sessionsDir)) {
+    for (const file of readdirSync(sessionsDir)) {
+      if (!file.endsWith('.jsonl') || !file.includes(sdkSessionId)) continue
+      return join(sessionsDir, file)
+    }
+  }
+
+  return undefined
+}
+
+function readLegacySdkMessages(sdkSessionId: string, projectDir?: string): Record<string, unknown>[] | undefined {
+  const sessionFilePath = findLegacySdkSessionJsonl(sdkSessionId, projectDir)
+  if (!sessionFilePath) return undefined
+  const lines = readFileSync(sessionFilePath, 'utf-8').split('\n').filter((line) => line.trim())
+  return parseJsonlStrict<Record<string, unknown>>(lines, `legacy SDK JSONL (${sdkSessionId})`)
+}
+
+export function resolveUserUuidFromLegacySdk(
+  sdkSessionIds: string[],
+  assistantMessageUuid: string,
+  projectDir?: string,
+): LegacyUserUuidResolution | undefined {
+  for (const sdkSessionId of uniqueNonEmpty(sdkSessionIds)) {
+    const messages = readLegacySdkMessages(sdkSessionId, projectDir)
+    if (!messages) continue
+
+    const assistantIdx = messages.findIndex((message) => getRecordString(message, 'uuid') === assistantMessageUuid)
+    if (assistantIdx < 0) continue
+
+    for (let i = assistantIdx + 1; i < messages.length; i++) {
+      const message = messages[i]!
+      if (isLegacyRealUserMessage(message)) {
+        const userMessageUuid = getRecordString(message, 'uuid')
+        if (!userMessageUuid) break
+        console.log(`[Agent 会话] legacy SDK 解析到下一轮 user uuid=${userMessageUuid} (assistant uuid=${assistantMessageUuid}, sdkSessionId=${sdkSessionId})`)
+        return { sdkSessionId, userMessageUuid, lastTurn: false }
+      }
+    }
+
+    console.log(`[Agent 会话] legacy SDK 目标是最后一个 turn (assistant uuid=${assistantMessageUuid}, sdkSessionId=${sdkSessionId})`)
+    return { sdkSessionId, userMessageUuid: '__LAST_TURN__', lastTurn: true }
+  }
+
+  return undefined
+}
+
+function mapLegacySnapshotPath(filePath: string, cwd: string, rootPathMap?: Map<string, string>): string {
+  const originalPath = isAbsolute(filePath) ? resolve(filePath) : resolve(cwd, filePath)
+  const mappings = [...(rootPathMap ?? new Map<string, string>())]
+    .sort(([left], [right]) => right.length - left.length)
+  for (const [sourceRoot, targetRoot] of mappings) {
+    const resolvedSource = resolve(sourceRoot)
+    if (!isPathInsideOrEqual(resolvedSource, originalPath)) continue
+    const rel = relative(resolvedSource, originalPath)
+    return rel ? resolve(targetRoot, rel) : resolve(targetRoot)
+  }
+  return originalPath
+}
+
+function collectLegacyFileState(messages: Record<string, unknown>[], targetIdx: number, userMessageUuid: string): {
+  fileState: Map<string, string | null>
+  targetSnapshotFound: boolean
+} {
+  const fileState = new Map<string, string | null>()
+  let targetSnapshotFound = false
+
+  for (const message of messages) {
+    if (message.type !== 'file-history-snapshot' || message.isSnapshotUpdate) continue
+    const snapshot = parseLegacySnapshot(message.snapshot)
+    if (snapshot?.messageId !== userMessageUuid || !snapshot.trackedFileBackups) continue
+    for (const [filePath, info] of Object.entries(snapshot.trackedFileBackups)) {
+      fileState.set(filePath, info.backupFileName)
+    }
+    targetSnapshotFound = true
+  }
+
+  if (targetSnapshotFound) {
+    for (const message of messages) {
+      if (message.type !== 'file-history-snapshot' || !message.isSnapshotUpdate) continue
+      const snapshot = parseLegacySnapshot(message.snapshot)
+      if (snapshot?.messageId !== userMessageUuid || !snapshot.trackedFileBackups) continue
+      for (const [filePath, info] of Object.entries(snapshot.trackedFileBackups)) {
+        if (!fileState.has(filePath)) {
+          fileState.set(filePath, info.backupFileName)
+        }
+      }
+    }
+  }
+
+  for (let i = targetIdx + 1; i < messages.length; i++) {
+    const message = messages[i]!
+    if (message.type !== 'file-history-snapshot') continue
+    const snapshot = parseLegacySnapshot(message.snapshot)
+    if (!snapshot?.trackedFileBackups) continue
+    for (const [filePath, info] of Object.entries(snapshot.trackedFileBackups)) {
+      if (!fileState.has(filePath) && info.backupFileName === null) {
+        fileState.set(filePath, null)
+      }
+    }
+  }
+
+  return { fileState, targetSnapshotFound }
+}
+
+interface LegacyRestoreOperation {
+  filePath: string
+  targetPath: string
+  backupPath?: string
+  shouldDelete: boolean
+}
+
+function prepareLegacyRestoreOperations(input: {
+  fileState: Map<string, string | null>
+  cwd: string
+  fileHistoryDir: string
+  rootPathMap?: Map<string, string>
+  allowedDirectories?: string[]
+}): LegacyRestoreOperation[] {
+  const allowedDirectories = uniqueNonEmpty([
+    resolve(input.cwd),
+    ...(input.allowedDirectories ?? []).map((dir) => resolve(dir)),
+  ])
+  const operations: LegacyRestoreOperation[] = []
+
+  for (const [filePath, backupFileName] of input.fileState) {
+    const targetPath = mapLegacySnapshotPath(filePath, input.cwd, input.rootPathMap)
+    const isAllowed = allowedDirectories.some((dir) => isPathInsideOrEqual(dir, targetPath))
+    if (!isAllowed) {
+      console.warn(`[Agent 会话] legacy rewindFiles: 跳过未映射或越界路径 ${filePath}`)
+      continue
+    }
+
+    if (backupFileName === null) {
+      operations.push({ filePath, targetPath, shouldDelete: true })
+      continue
+    }
+
+    const backupPath = resolve(input.fileHistoryDir, backupFileName)
+    if (!isPathInsideOrEqual(input.fileHistoryDir, backupPath)) {
+      throw new Error(`legacy file-history 备份路径越界: ${backupFileName}`)
+    }
+    if (!existsSync(backupPath)) {
+      throw new Error(`legacy file-history 备份文件不存在: ${backupPath}`)
+    }
+
+    operations.push({ filePath, targetPath, backupPath, shouldDelete: false })
+  }
+
+  return operations
+}
+
+function applyLegacyRestoreOperations(operations: LegacyRestoreOperation[]): string[] {
+  const filesChanged: string[] = []
+  for (const operation of operations) {
+    if (operation.shouldDelete) {
+      if (existsSync(operation.targetPath)) {
+        rmSync(operation.targetPath, { force: true })
+        filesChanged.push(operation.filePath)
+        console.log(`[Agent 会话] legacy rewindFiles: 删除 ${operation.filePath}`)
+      }
+      continue
+    }
+
+    if (!operation.backupPath) continue
+    const dir = dirname(operation.targetPath)
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    writeFileSync(operation.targetPath, readFileSync(operation.backupPath))
+    filesChanged.push(operation.filePath)
+    console.log(`[Agent 会话] legacy rewindFiles: 恢复 ${operation.filePath}`)
+  }
+  return filesChanged
+}
+
+export function rewindFilesFromLegacySnapshot(input: LegacyFileHistoryRestoreInput): LegacyFileHistoryRestoreResult {
+  const sdkSessionIds = uniqueNonEmpty(input.sdkSessionIds)
+  if (sdkSessionIds.length === 0) {
+    return { canRewind: false, error: '缺少 legacy SDK session ID，无法读取 Claude file-history' }
+  }
+
+  try {
+    let targetUserMessageUuid = input.userMessageUuid
+    let resolvedSdkSessionId: string | undefined
+    if (!targetUserMessageUuid && input.assistantMessageUuid) {
+      const resolution = resolveUserUuidFromLegacySdk(sdkSessionIds, input.assistantMessageUuid, input.projectDir)
+      if (!resolution) {
+        return { canRewind: false, error: `legacy SDK JSONL 中未找到 assistant uuid=${input.assistantMessageUuid}` }
+      }
+      if (resolution.lastTurn) {
+        return {
+          canRewind: false,
+          error: 'legacy SDK 目标是最后一个 turn，无需 file-history 恢复',
+          resolvedSdkSessionId: resolution.sdkSessionId,
+          resolvedUserMessageUuid: resolution.userMessageUuid,
+          lastTurn: true,
+        }
+      }
+      targetUserMessageUuid = resolution.userMessageUuid
+      resolvedSdkSessionId = resolution.sdkSessionId
+    }
+
+    if (!targetUserMessageUuid || targetUserMessageUuid === '__LAST_TURN__') {
+      return { canRewind: false, error: 'legacy file-history 缺少目标 user message UUID', lastTurn: targetUserMessageUuid === '__LAST_TURN__' }
+    }
+
+    for (const sdkSessionId of resolvedSdkSessionId ? [resolvedSdkSessionId, ...sdkSessionIds] : sdkSessionIds) {
+      const messages = readLegacySdkMessages(sdkSessionId, input.projectDir)
+      if (!messages) continue
+      const targetIdx = messages.findIndex((message) => getRecordString(message, 'uuid') === targetUserMessageUuid)
+      if (targetIdx < 0) continue
+
+      const { fileState, targetSnapshotFound } = collectLegacyFileState(messages, targetIdx, targetUserMessageUuid)
+      if (fileState.size === 0) {
+        if (!targetSnapshotFound) {
+          return { canRewind: false, error: '目标消息无 legacy file-history-snapshot 记录（会话可能在启用文件检查点前创建）' }
+        }
+        return {
+          canRewind: true,
+          filesChanged: [],
+          resolvedSdkSessionId: sdkSessionId,
+          resolvedUserMessageUuid: targetUserMessageUuid,
+        }
+      }
+
+      const fileHistoryDir = resolve(getSdkConfigDir(), 'file-history', sdkSessionId)
+      const operations = prepareLegacyRestoreOperations({
+        fileState,
+        cwd: input.cwd,
+        fileHistoryDir,
+        rootPathMap: input.rootPathMap,
+        allowedDirectories: input.allowedDirectories,
+      })
+
+      const filesChanged = applyLegacyRestoreOperations(operations)
+      console.log(`[Agent 会话] legacy rewindFilesFromSnapshot 完成: ${filesChanged.length} 个文件已恢复, sdkSessionId=${sdkSessionId}`)
+      return {
+        canRewind: true,
+        filesChanged,
+        resolvedSdkSessionId: sdkSessionId,
+        resolvedUserMessageUuid: targetUserMessageUuid,
+      }
+    }
+
+    return { canRewind: false, error: `legacy SDK JSONL 中未找到 user message uuid=${targetUserMessageUuid}` }
+  } catch (error) {
+    return { canRewind: false, error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /**

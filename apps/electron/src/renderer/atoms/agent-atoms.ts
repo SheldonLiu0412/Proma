@@ -625,6 +625,42 @@ function getStableIndicatorMap(entries: Array<[string, SessionIndicatorStatus]>)
   return lastIndicatorMap
 }
 
+interface AgentSessionIndicatorInput {
+  streamStates: Map<string, AgentStreamState>
+  pendingPermissionRequests: Map<string, readonly unknown[]>
+  pendingAskUserRequests: Map<string, readonly unknown[]>
+  pendingExitPlanRequests: Map<string, readonly unknown[]>
+  unviewedCompletedSessionIds: Set<string>
+}
+
+function setBlockedSessionsFromPending(
+  map: Map<string, SessionIndicatorStatus>,
+  pendingRequests: Map<string, readonly unknown[]>,
+): void {
+  for (const [id, requests] of pendingRequests) {
+    if (requests.length > 0) map.set(id, 'blocked')
+  }
+}
+
+export function buildAgentSessionIndicatorMap(input: AgentSessionIndicatorInput): Map<string, SessionIndicatorStatus> {
+  const map = new Map<string, SessionIndicatorStatus>()
+
+  setBlockedSessionsFromPending(map, input.pendingPermissionRequests)
+  setBlockedSessionsFromPending(map, input.pendingAskUserRequests)
+  setBlockedSessionsFromPending(map, input.pendingExitPlanRequests)
+
+  for (const [id, state] of input.streamStates) {
+    if (!state.running) continue
+    if (!map.has(id)) map.set(id, 'running')
+  }
+
+  for (const id of input.unviewedCompletedSessionIds) {
+    if (!map.has(id)) map.set(id, 'completed')
+  }
+
+  return map
+}
+
 /** Dock/Launcher 角标数量：未查看完成会话 + 待处理阻塞请求 */
 export const dockBadgeCountAtom = atom<number>((get) => {
   return calculateDockBadgeCount({
@@ -640,27 +676,13 @@ export const dockBadgeCountAtom = atom<number>((get) => {
  * 优先级：blocked > running > completed > idle
  */
 export const agentSessionIndicatorMapAtom = atom<Map<string, SessionIndicatorStatus>>((get) => {
-  const streamStates = get(agentStreamingStatesAtom)
-  const pendingPerms = get(allPendingPermissionRequestsAtom)
-  const pendingAskUser = get(allPendingAskUserRequestsAtom)
-  const pendingExitPlan = get(allPendingExitPlanRequestsAtom)
-  const unviewedCompleted = get(unviewedCompletedSessionIdsAtom)
-
-  const map = new Map<string, SessionIndicatorStatus>()
-
-  for (const [id, state] of streamStates) {
-    if (!state.running) continue
-    const hasBlock = (pendingPerms.get(id)?.length ?? 0) > 0
-      || (pendingAskUser.get(id)?.length ?? 0) > 0
-      || (pendingExitPlan.get(id)?.length ?? 0) > 0
-    map.set(id, hasBlock ? 'blocked' : 'running')
-  }
-
-  for (const id of unviewedCompleted) {
-    if (!map.has(id)) {
-      map.set(id, 'completed')
-    }
-  }
+  const map = buildAgentSessionIndicatorMap({
+    streamStates: get(agentStreamingStatesAtom),
+    pendingPermissionRequests: get(allPendingPermissionRequestsAtom),
+    pendingAskUserRequests: get(allPendingAskUserRequestsAtom),
+    pendingExitPlanRequests: get(allPendingExitPlanRequestsAtom),
+    unviewedCompletedSessionIds: get(unviewedCompletedSessionIdsAtom),
+  })
 
   return getStableIndicatorMap(Array.from(map.entries()))
 })

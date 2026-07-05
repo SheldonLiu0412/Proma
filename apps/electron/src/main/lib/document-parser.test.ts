@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import JSZip from 'jszip'
-import { extractTextFromFile, isSupportedDocumentExtension } from './document-parser'
+import {
+  extractTextFromAttachment,
+  extractTextFromFile,
+  isDocumentAttachment,
+  isSupportedDocumentExtension,
+} from './document-parser'
 
 // ===== 测试夹具：用 jszip 现造最小但合法的 OOXML 包 =====
 // OOXML（docx/xlsx/pptx 及其宏/模板变体）本质都是带固定目录结构的 zip。
@@ -91,6 +96,22 @@ describe('document-parser / 扩展名识别', () => {
     expect(isSupportedDocumentExtension('.WPS')).toBe(true)
     expect(isSupportedDocumentExtension('.PDF')).toBe(true)
   })
+
+  test('非 vision 图片进入文档/普通文件流程，避免附件黑洞', () => {
+    expect(isDocumentAttachment('image/png')).toBe(false)
+    expect(isDocumentAttachment('image/jpeg')).toBe(false)
+    expect(isDocumentAttachment('image/gif')).toBe(false)
+    expect(isDocumentAttachment('image/webp')).toBe(false)
+
+    expect(isDocumentAttachment('image/svg+xml')).toBe(true)
+    expect(isDocumentAttachment('image/bmp')).toBe(true)
+    expect(isDocumentAttachment('image/x-icon')).toBe(true)
+    expect(isDocumentAttachment('image/vnd.microsoft.icon')).toBe(true)
+  })
+
+  test('SVG 作为文本图片支持提取', () => {
+    expect(isSupportedDocumentExtension('.svg')).toBe(true)
+  })
 })
 
 describe('document-parser / 真实提取', () => {
@@ -175,5 +196,23 @@ describe('document-parser / 真实提取', () => {
     expect(text).not.toContain('Acme')
     expect(text).not.toContain('Bob')
     expect(text).not.toContain('listtemplateid')
+  })
+
+  test('提取 SVG 附件文本内容', async () => {
+    const path = join(dir, 'vector.svg')
+    writeFileSync(path, '<svg><title>VectorTitle</title></svg>')
+    const text = await extractTextFromFile(path)
+    expect(text).toContain('VectorTitle')
+  })
+
+  test('BMP/ICO 作为普通文件附件时给出明确不支持提示', async () => {
+    const bmpPath = join(dir, 'bitmap.bmp')
+    const icoPath = join(dir, 'icon.ico')
+    writeFileSync(bmpPath, 'bitmap')
+    writeFileSync(icoPath, 'icon')
+
+    await expect(extractTextFromFile(bmpPath)).rejects.toThrow('不能作为文档提取')
+    await expect(extractTextFromFile(icoPath)).rejects.toThrow('不能作为文档提取')
+    await expect(extractTextFromAttachment('conversation/icon.ico', 'image/x-icon')).rejects.toThrow('不能作为文档提取')
   })
 })

@@ -424,14 +424,14 @@ export function parseSkillVersion(skillDir: string): string {
   try {
     let content = readFileSync(skillMdPath, 'utf-8')
     if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1)
-    const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/)
+    const fmMatch = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/)
     if (!fmMatch?.[1]) return '0.0.0'
 
     for (const line of fmMatch[1].split('\n')) {
       const colonIdx = line.indexOf(':')
       if (colonIdx === -1) continue
       const key = line.slice(0, colonIdx).trim()
-      const value = line.slice(colonIdx + 1).trim().replace(/^["']|["']$/g, '')
+      const value = line.slice(colonIdx + 1).trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')
       if (key === 'version' && value) return value
     }
   } catch {

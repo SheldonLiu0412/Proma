@@ -1069,7 +1069,10 @@ export interface AgentStreamCompletePayload {
   resultSubtype?: string
   /** SDK result 消息携带的错误详情（error_during_execution 等场景下的真实错误原因，用于展示具体错误） */
   resultErrors?: string[]
-  /** 本轮主体结束但仍有后台任务/定时任务在飞行：UI 进入"空闲可输入"态，等待任务完成自动唤醒 */
+  /**
+   * 旧 SDK 后台任务兼容态：本轮主体结束但仍有后台任务/定时任务在飞行。
+   * Pi runtime 不再通过保活通道等待 task_notification 自动续轮；新路径应使用 Proma automation / collaboration。
+   */
   backgroundTasksPending?: boolean
 }
 

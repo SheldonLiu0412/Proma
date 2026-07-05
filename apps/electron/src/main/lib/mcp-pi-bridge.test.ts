@@ -6,6 +6,11 @@ interface FakeToolInfo {
   name: string
   description?: string
   inputSchema?: Record<string, unknown>
+  annotations?: {
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+  }
+  _meta?: Record<string, unknown>
 }
 
 interface FakeListToolsResult {
@@ -32,6 +37,28 @@ interface DefinedTool {
   parameters?: unknown
 }
 
+interface NormalizedTextBlock {
+  type: 'text'
+  text: string
+}
+
+interface NormalizedImageBlock {
+  type: 'image'
+  data: string
+  mimeType: string
+}
+
+type NormalizedContentBlock = NormalizedTextBlock | NormalizedImageBlock
+
+interface ToolExecutionResult {
+  content: NormalizedContentBlock[]
+}
+
+interface ExecutableTool {
+  name: string
+  execute: (id: string, params: unknown, signal?: AbortSignal) => Promise<ToolExecutionResult>
+}
+
 type ListToolsBehavior =
   | { kind: 'success'; tools: FakeToolInfo[] }
   | { kind: 'hang' }
@@ -48,7 +75,10 @@ class FakeClient {
   listToolsOptions: Array<FakeRequestOptions | undefined> = []
   callToolOptions: Array<FakeRequestOptions | undefined> = []
   getPromptOptions: Array<FakeRequestOptions | undefined> = []
+  readResourceOptions: Array<FakeRequestOptions | undefined> = []
+  callToolResult: unknown = { content: [{ type: 'text', text: 'ok' }] }
   getPromptResult: unknown = { messages: [] }
+  readResourceResult: unknown = { contents: [] }
 
   constructor(_clientInfo: { name: string; version: string }) {
     this.behavior = queuedListToolsBehaviors.shift() ?? { kind: 'success', tools: [] }
@@ -80,12 +110,17 @@ class FakeClient {
 
   async callTool(_params: unknown, _resultSchema?: unknown, options?: FakeRequestOptions): Promise<unknown> {
     this.callToolOptions.push(options)
-    return { content: [{ type: 'text', text: 'ok' }] }
+    return this.callToolResult
   }
 
   async getPrompt(_params: unknown, options?: FakeRequestOptions): Promise<unknown> {
     this.getPromptOptions.push(options)
     return this.getPromptResult
+  }
+
+  async readResource(_params: unknown, options?: FakeRequestOptions): Promise<unknown> {
+    this.readResourceOptions.push(options)
+    return this.readResourceResult
   }
 }
 
@@ -120,6 +155,14 @@ function resetFakes(): void {
   queuedListToolsBehaviors = []
   fakeClients.length = 0
   fakeTransports.length = 0
+}
+
+function findExecutableTool(tools: unknown[], name: string): ExecutableTool | undefined {
+  return tools.find((tool): tool is ExecutableTool => {
+    if (!tool || typeof tool !== 'object') return false
+    const record = tool as Record<string, unknown>
+    return record.name === name && typeof record.execute === 'function'
+  })
 }
 
 beforeAll(async () => {
@@ -193,9 +236,7 @@ describe('MCP Pi bridge 初始化', () => {
       },
     })
 
-    const bridged = result.tools.find((tool) => (tool as { name: string }).name === 'mcp__tools__echo') as
-      | { execute: (id: string, params: unknown, signal?: AbortSignal) => Promise<unknown> }
-      | undefined
+    const bridged = findExecutableTool(result.tools, 'mcp__tools__echo')
     expect(bridged).toBeDefined()
     await bridged!.execute('call-1', {})
 
@@ -214,9 +255,7 @@ describe('MCP Pi bridge 初始化', () => {
       },
     })
 
-    const bridged = result.tools.find((tool) => (tool as { name: string }).name === 'mcp__tools__echo') as
-      | { execute: (id: string, params: unknown, signal?: AbortSignal) => Promise<unknown> }
-      | undefined
+    const bridged = findExecutableTool(result.tools, 'mcp__tools__echo')
     await bridged!.execute('call-1', {})
 
     expect(fakeClients[0]?.callToolOptions[0]?.timeout).toBe(60000)
@@ -242,9 +281,7 @@ describe('MCP Pi bridge 初始化', () => {
       ],
     }
 
-    const getPromptTool = result.tools.find((tool) => (tool as { name: string }).name === 'GetMcpPromptTool') as
-      | { execute: (id: string, params: unknown, signal?: AbortSignal) => Promise<{ content: Array<{ type: string; text?: string }> }> }
-      | undefined
+    const getPromptTool = findExecutableTool(result.tools, 'GetMcpPromptTool')
     expect(getPromptTool).toBeDefined()
     const output = await getPromptTool!.execute('call-1', { name: 'greet' })
 
@@ -253,6 +290,172 @@ describe('MCP Pi bridge 初始化', () => {
       { type: 'text', text: '[assistant] 在的' },
     ])
     expect(fakeClients[0]?.getPromptOptions[0]?.timeout).toBe(7000)
+
+    await result.cleanup()
+  })
+
+  test('Given MCP 工具返回多类型 content When 调用桥接工具 Then 展开 resource 并明确降级不支持的类型', async () => {
+    queuedListToolsBehaviors.push({ kind: 'success', tools: [{ name: 'read_bundle' }] })
+
+    const result = await bridge.buildMcpBridgeTools({
+      content: {
+        type: 'stdio',
+        command: 'content-mcp',
+      },
+    })
+
+    fakeClients[0]!.callToolResult = {
+      content: [
+        { type: 'text', text: 'plain text' },
+        { type: 'image', data: 'direct-image-base64', mimeType: 'image/png' },
+        {
+          type: 'resource',
+          resource: {
+            uri: 'file:///notes.md',
+            mimeType: 'text/markdown',
+            text: '# Notes',
+          },
+        },
+        {
+          type: 'resource',
+          resource: {
+            uri: 'file:///chart.png',
+            mimeType: 'image/png',
+            blob: 'embedded-image-base64',
+          },
+        },
+        { type: 'audio', data: 'audio-base64', mimeType: 'audio/wav' },
+        {
+          type: 'resource_link',
+          uri: 'file:///linked.csv',
+          name: 'linked.csv',
+          description: '结果明细',
+          mimeType: 'text/csv',
+          size: 42,
+        },
+      ],
+    }
+
+    const bridged = findExecutableTool(result.tools, 'mcp__content__read_bundle')
+    expect(bridged).toBeDefined()
+    const output = await bridged!.execute('call-1', {})
+
+    expect(output.content[0]).toEqual({ type: 'text', text: 'plain text' })
+    expect(output.content[1]).toEqual({ type: 'image', data: 'direct-image-base64', mimeType: 'image/png' })
+    expect(output.content[2]).toEqual({
+      type: 'text',
+      text: '[MCP resource kind=embedded, uri=file:///notes.md, mimeType=text/markdown]\n# Notes',
+    })
+    expect(output.content[3]).toEqual({
+      type: 'text',
+      text: '[MCP resource kind=embedded, uri=file:///chart.png, mimeType=image/png]',
+    })
+    expect(output.content[4]).toEqual({ type: 'image', data: 'embedded-image-base64', mimeType: 'image/png' })
+    expect(output.content[5]?.type).toBe('text')
+    expect((output.content[5] as NormalizedTextBlock).text).toContain('MCP audio 已降级为文本摘要')
+    expect((output.content[5] as NormalizedTextBlock).text).toContain('mimeType: audio/wav')
+    expect(output.content[6]?.type).toBe('text')
+    expect((output.content[6] as NormalizedTextBlock).text).toContain('file:///linked.csv')
+    expect((output.content[6] as NormalizedTextBlock).text).toContain('ReadMcpResourceTool')
+
+    await result.cleanup()
+  })
+
+  test('Given ReadMcpResourceTool 读取 text/image/binary resource When 执行 Then 保留 uri 和 mime 关键信息', async () => {
+    queuedListToolsBehaviors.push({ kind: 'success', tools: [] })
+
+    const result = await bridge.buildMcpBridgeTools({
+      resources: {
+        type: 'stdio',
+        command: 'resources-mcp',
+      },
+    })
+
+    fakeClients[0]!.readResourceResult = {
+      contents: [
+        { uri: 'file:///doc.txt', mimeType: 'text/plain', text: 'hello' },
+        { uri: 'file:///image.jpg', mimeType: 'image/jpeg', blob: 'image-base64' },
+        { uri: 'file:///sound.wav', mimeType: 'audio/wav', blob: 'sound-base64' },
+      ],
+    }
+
+    const readResourceTool = findExecutableTool(result.tools, 'ReadMcpResourceTool')
+    expect(readResourceTool).toBeDefined()
+    const output = await readResourceTool!.execute('call-1', { uri: 'file:///doc.txt' })
+
+    expect(output.content[0]).toEqual({
+      type: 'text',
+      text: '[MCP resource kind=read, uri=file:///doc.txt, mimeType=text/plain]\nhello',
+    })
+    expect(output.content[1]).toEqual({
+      type: 'text',
+      text: '[MCP resource kind=read, uri=file:///image.jpg, mimeType=image/jpeg]',
+    })
+    expect(output.content[2]).toEqual({ type: 'image', data: 'image-base64', mimeType: 'image/jpeg' })
+    expect(output.content[3]?.type).toBe('text')
+    expect((output.content[3] as NormalizedTextBlock).text).toContain('file:///sound.wav')
+    expect((output.content[3] as NormalizedTextBlock).text).toContain('mimeType: audio/wav')
+    expect(fakeClients[0]?.readResourceOptions[0]?.timeout).toBe(60000)
+
+    await result.cleanup()
+  })
+
+  test('Given 未标注的只读动作名称 When 构建桥接工具 Then 加入 readOnlyToolNames', async () => {
+    queuedListToolsBehaviors.push({
+      kind: 'success',
+      tools: [
+        { name: 'list_issues' },
+        { name: 'getUser' },
+        { name: 'search-files' },
+        { name: 'read' },
+        { name: 'fetch_url' },
+        { name: 'queryDatabase' },
+      ],
+    })
+
+    const result = await bridge.buildMcpBridgeTools({
+      github: {
+        type: 'stdio',
+        command: 'github-mcp',
+      },
+    })
+
+    expect(result.readOnlyToolNames).toContain('mcp__github__list_issues')
+    expect(result.readOnlyToolNames).toContain('mcp__github__getUser')
+    expect(result.readOnlyToolNames).toContain('mcp__github__search-files')
+    expect(result.readOnlyToolNames).toContain('mcp__github__read')
+    expect(result.readOnlyToolNames).toContain('mcp__github__fetch_url')
+    expect(result.readOnlyToolNames).toContain('mcp__github__queryDatabase')
+
+    await result.cleanup()
+  })
+
+  test('Given 名称或标注显示会修改状态 When 构建桥接工具 Then destructive 优先否决只读启发式', async () => {
+    queuedListToolsBehaviors.push({
+      kind: 'success',
+      tools: [
+        { name: 'delete_file', annotations: { readOnlyHint: true } },
+        { name: 'get_or_create_user' },
+        { name: 'postMessage' },
+        { name: 'send_email' },
+        { name: 'list_then_update' },
+        { name: 'fetch_secret', annotations: { destructiveHint: true } },
+      ],
+    })
+
+    const result = await bridge.buildMcpBridgeTools({
+      mixed: {
+        type: 'stdio',
+        command: 'mixed-mcp',
+      },
+    })
+
+    expect(result.readOnlyToolNames).not.toContain('mcp__mixed__delete_file')
+    expect(result.readOnlyToolNames).not.toContain('mcp__mixed__get_or_create_user')
+    expect(result.readOnlyToolNames).not.toContain('mcp__mixed__postMessage')
+    expect(result.readOnlyToolNames).not.toContain('mcp__mixed__send_email')
+    expect(result.readOnlyToolNames).not.toContain('mcp__mixed__list_then_update')
+    expect(result.readOnlyToolNames).not.toContain('mcp__mixed__fetch_secret')
 
     await result.cleanup()
   })

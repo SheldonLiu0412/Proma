@@ -52,6 +52,15 @@ interface McpToolInfo {
   _meta?: Record<string, unknown>
 }
 
+interface McpResourceContentInfo {
+  uri?: string
+  mimeType?: string
+  text?: string
+  blob?: string
+  _meta?: unknown
+  raw: Record<string, unknown>
+}
+
 interface McpResourceInfo {
   uri: string
   name: string
@@ -76,6 +85,48 @@ interface McpPromptInfo {
 type DefineTool = typeof import('@earendil-works/pi-coding-agent')['defineTool']
 
 const MCP_BRIDGE_LOAD_CONCURRENCY = 4
+const BINARY_DATA_PREVIEW_CHARS = 120
+const READ_ONLY_TOOL_ACTIONS = new Set(['list', 'get', 'search', 'read', 'fetch', 'query'])
+const MUTATING_TOOL_ACTIONS = new Set([
+  'append',
+  'archive',
+  'cancel',
+  'clear',
+  'commit',
+  'create',
+  'delete',
+  'deploy',
+  'drop',
+  'edit',
+  'execute',
+  'insert',
+  'install',
+  'kill',
+  'merge',
+  'move',
+  'mutate',
+  'patch',
+  'post',
+  'publish',
+  'push',
+  'put',
+  'remove',
+  'rename',
+  'replace',
+  'restart',
+  'run',
+  'send',
+  'set',
+  'start',
+  'stop',
+  'submit',
+  'trigger',
+  'uninstall',
+  'update',
+  'upload',
+  'upsert',
+  'write',
+])
 
 type McpServerLoadResult =
   | {
@@ -156,11 +207,63 @@ function uniqueBridgeToolName(baseName: string, usedNames: Set<string>): string 
   return uniqueName
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function getStringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function getNumberField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function getBooleanMeta(meta: Record<string, unknown> | undefined, keys: string[]): boolean {
+  if (!meta) return false
+  return keys.some((key) => meta[key] === true)
+}
+
+function toolNameActionCandidates(toolName: string): string[] {
+  const bridgeParts = toolName.split('__')
+  if (bridgeParts.length >= 3 && bridgeParts[0] === 'mcp') {
+    return [bridgeParts.slice(2).join('__')]
+  }
+  return [toolName]
+}
+
+function tokenizeToolName(toolName: string): string[] {
+  return toolName
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function hasMutatingToolName(toolName: string): boolean {
+  return toolNameActionCandidates(toolName).some((candidate) =>
+    tokenizeToolName(candidate).some((token) => MUTATING_TOOL_ACTIONS.has(token)),
+  )
+}
+
+function hasReadOnlyToolName(toolName: string): boolean {
+  return toolNameActionCandidates(toolName).some((candidate) => {
+    const [firstToken] = tokenizeToolName(candidate)
+    return firstToken ? READ_ONLY_TOOL_ACTIONS.has(firstToken) : false
+  })
+}
+
 function isReadOnlyMcpTool(tool: McpToolInfo): boolean {
   if (tool.annotations?.destructiveHint === true) return false
+  if (getBooleanMeta(tool._meta, ['destructiveHint', 'destructive', 'mutating', 'write'])) return false
+  if (hasMutatingToolName(tool.name)) return false
   if (tool.annotations?.readOnlyHint === true) return true
-  const metaReadOnly = tool._meta?.readOnlyHint ?? tool._meta?.['readOnly']
-  return metaReadOnly === true
+  if (getBooleanMeta(tool._meta, ['readOnlyHint', 'readOnly', 'readOnlyTool'])) return true
+  return hasReadOnlyToolName(tool.name)
 }
 
 function asJsonObjectSchema(schema: unknown): Record<string, unknown> {
@@ -226,20 +329,132 @@ function textContent(text: string): TextContent {
   return { type: 'text', text }
 }
 
+function safeJsonStringify(value: unknown): string {
+  try {
+    const json = JSON.stringify(value, null, 2)
+    return json ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function toMcpResourceContentInfo(value: unknown): McpResourceContentInfo | undefined {
+  if (!isPlainRecord(value)) return undefined
+  return {
+    uri: getStringField(value, 'uri'),
+    mimeType: getStringField(value, 'mimeType'),
+    text: getStringField(value, 'text'),
+    blob: getStringField(value, 'blob'),
+    _meta: value._meta,
+    raw: value,
+  }
+}
+
+function formatMcpResourceHeader(label: string, resource: McpResourceContentInfo): string {
+  const fields = [
+    `kind=${label}`,
+    resource.uri ? `uri=${resource.uri}` : undefined,
+    resource.mimeType ? `mimeType=${resource.mimeType}` : undefined,
+  ].filter((field): field is string => Boolean(field))
+  const metaText = resource._meta !== undefined ? `\nmeta=${safeJsonStringify(resource._meta)}` : ''
+  return `[MCP resource ${fields.join(', ')}]${metaText}`
+}
+
+function summarizeBinaryData(label: string, data: string, mimeType: string, uri?: string): TextContent {
+  const preview = data.length > BINARY_DATA_PREVIEW_CHARS
+    ? `${data.slice(0, BINARY_DATA_PREVIEW_CHARS)}...`
+    : data
+  const uriLine = uri ? `\nuri: ${uri}` : ''
+  return textContent(
+    `[MCP ${label} 已降级为文本摘要]${uriLine}\nmimeType: ${mimeType}\nbase64Length: ${data.length}\nbase64Preview: ${preview}`,
+  )
+}
+
+function normalizeMcpResourceContent(resource: McpResourceContentInfo, label: string): Array<TextContent | ImageContent> {
+  const mimeType = resource.mimeType ?? 'application/octet-stream'
+  const header = formatMcpResourceHeader(label, { ...resource, mimeType })
+
+  if (resource.text !== undefined) {
+    return [textContent(`${header}\n${resource.text}`)]
+  }
+
+  if (resource.blob !== undefined && mimeType.startsWith('image/')) {
+    return [
+      textContent(header),
+      { type: 'image', data: resource.blob, mimeType },
+    ]
+  }
+
+  if (resource.blob !== undefined) {
+    return [summarizeBinaryData('binary resource', resource.blob, mimeType, resource.uri)]
+  }
+
+  return [textContent(`${header}\n资源缺少 text/blob 字段，原始内容:\n${safeJsonStringify(resource.raw)}`)]
+}
+
+function normalizeEmbeddedResource(block: Record<string, unknown>): Array<TextContent | ImageContent> {
+  const resource = toMcpResourceContentInfo(block.resource)
+  if (!resource) {
+    return [textContent(`MCP embedded resource 格式无效，已保留原始 JSON:\n${safeJsonStringify(block)}`)]
+  }
+  return normalizeMcpResourceContent(resource, 'embedded')
+}
+
+function normalizeResourceLink(block: Record<string, unknown>): TextContent {
+  const linkInfo = {
+    type: 'resource_link',
+    uri: getStringField(block, 'uri'),
+    name: getStringField(block, 'name'),
+    title: getStringField(block, 'title'),
+    description: getStringField(block, 'description'),
+    mimeType: getStringField(block, 'mimeType'),
+    size: getNumberField(block, 'size'),
+  }
+  return textContent(
+    `MCP resource_link 仅提供资源引用，未内嵌内容。可使用 ReadMcpResourceTool 按 uri 读取。\n${safeJsonStringify(linkInfo)}`,
+  )
+}
+
+function normalizeAudioContent(block: Record<string, unknown>): TextContent {
+  const data = getStringField(block, 'data')
+  const mimeType = getStringField(block, 'mimeType') ?? 'audio/unknown'
+  if (!data) {
+    return textContent(`MCP audio 内容缺少 base64 data，已保留原始 JSON:\n${safeJsonStringify(block)}`)
+  }
+  return summarizeBinaryData('audio', data, mimeType)
+}
+
+function normalizeContentBlock(block: Record<string, unknown>): Array<TextContent | ImageContent> {
+  if (block.type === 'text' && typeof block.text === 'string') {
+    return [{ type: 'text', text: block.text }]
+  }
+  if (block.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string') {
+    return [{ type: 'image', data: block.data, mimeType: block.mimeType }]
+  }
+  if (block.type === 'resource') {
+    return normalizeEmbeddedResource(block)
+  }
+  if (block.type === 'resource_link') {
+    return [normalizeResourceLink(block)]
+  }
+  if (block.type === 'audio') {
+    return [normalizeAudioContent(block)]
+  }
+  return [textContent(`MCP content block 未知类型，已保留原始 JSON:\n${safeJsonStringify(block)}`)]
+}
+
 function normalizeContentBlocks(content: unknown): Array<TextContent | ImageContent> {
   const result: Array<TextContent | ImageContent> = []
+  if (typeof content === 'string') {
+    return [textContent(content)]
+  }
   if (Array.isArray(content)) {
     for (const item of content) {
       if (!item || typeof item !== 'object') continue
-      const block = item as Record<string, unknown>
-      if (block.type === 'text' && typeof block.text === 'string') {
-        result.push({ type: 'text', text: block.text })
-      } else if (block.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string') {
-        result.push({ type: 'image', data: block.data, mimeType: block.mimeType })
-      } else {
-        result.push(textContent(JSON.stringify(block, null, 2)))
-      }
+      result.push(...normalizeContentBlock(item as Record<string, unknown>))
     }
+  } else if (isPlainRecord(content)) {
+    result.push(...normalizeContentBlock(content))
   }
   return result
 }
@@ -248,7 +463,7 @@ function normalizeMcpContent(content: unknown, structuredContent: unknown): Arra
   const result = normalizeContentBlocks(content)
 
   if (result.length === 0 && structuredContent !== undefined) {
-    result.push(textContent(JSON.stringify(structuredContent, null, 2)))
+    result.push(textContent(safeJsonStringify(structuredContent)))
   }
 
   return result.length > 0 ? result : [textContent('工具已完成，但没有返回内容。')]
@@ -285,15 +500,8 @@ function normalizeResourceContents(contents: unknown): Array<TextContent | Image
   if (!Array.isArray(contents)) return [textContent('资源读取完成，但没有返回内容。')]
   for (const item of contents) {
     if (!item || typeof item !== 'object') continue
-    const block = item as Record<string, unknown>
-    const mimeType = typeof block.mimeType === 'string' ? block.mimeType : 'application/octet-stream'
-    if (typeof block.text === 'string') {
-      result.push(textContent(block.text))
-    } else if (typeof block.blob === 'string' && mimeType.startsWith('image/')) {
-      result.push({ type: 'image', data: block.blob, mimeType })
-    } else if (typeof block.blob === 'string') {
-      result.push(textContent(`[${mimeType} blob, ${block.blob.length} base64 chars]`))
-    }
+    const resource = toMcpResourceContentInfo(item)
+    if (resource) result.push(...normalizeMcpResourceContent(resource, 'read'))
   }
   return result.length > 0 ? result : [textContent('资源读取完成，但没有返回可展示内容。')]
 }

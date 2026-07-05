@@ -19,6 +19,11 @@ import {
   getConversationAttachmentsDir,
   resolveAttachmentPath,
 } from './config-paths'
+import {
+  isPreviewableImageMediaType,
+  isVisionImageMediaType,
+  normalizeAttachmentMediaType,
+} from './attachment-media-types'
 import type {
   FileAttachment,
   AttachmentSaveInput,
@@ -29,14 +34,6 @@ import type {
   FileDialogSkippedFile,
 } from '@proma/shared'
 import { MAX_ATTACHMENT_SIZE } from '@proma/shared'
-
-/** 支持的图片 MIME 类型 */
-const IMAGE_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/gif',
-  'image/webp',
-])
 
 /** 扩展名 → MIME 类型映射 */
 const MIME_MAP: Record<string, string> = {
@@ -112,10 +109,26 @@ const FILE_FILTERS = [
 ]
 
 /**
- * 判断是否为图片附件
+ * 判断是否为可在 UI 中预览的图片附件。
+ */
+export function isPreviewableImageAttachment(mediaType: string): boolean {
+  return isPreviewableImageMediaType(mediaType)
+}
+
+/**
+ * 判断是否为可发送给 vision provider 的图片附件。
+ */
+export function isVisionImageAttachment(mediaType: string): boolean {
+  return isVisionImageMediaType(mediaType)
+}
+
+/**
+ * 判断是否为 vision 图片附件。
+ *
+ * 保留旧导出名称，避免调用方误把 svg/bmp/ico 送入模型图片通道。
  */
 export function isImageAttachment(mediaType: string): boolean {
-  return IMAGE_MIME_TYPES.has(normalizeMediaType(mediaType))
+  return isVisionImageAttachment(mediaType)
 }
 
 /**
@@ -127,7 +140,7 @@ export function getMimeType(ext: string): string {
 }
 
 function getExtensionForMediaType(mediaType: string): string | undefined {
-  switch (normalizeMediaType(mediaType)) {
+  switch (normalizeAttachmentMediaType(mediaType)) {
     case 'image/png':
       return '.png'
     case 'image/jpeg':
@@ -150,10 +163,6 @@ function getExtensionForMediaType(mediaType: string): string | undefined {
 interface ImageAttachmentReadInput {
   localPath: string
   mediaType: string
-}
-
-function normalizeMediaType(mediaType: string): string {
-  return mediaType.split(';', 1)[0]?.trim().toLowerCase() ?? ''
 }
 
 function isPathInsideRoot(targetPath: string, rootPath: string): boolean {
@@ -199,12 +208,12 @@ function resolveSafeImageAttachmentPath(localPath: string, mediaType?: string): 
   const extension = extname(fullPath).toLowerCase()
   const inferredMediaType = getMimeType(extension)
 
-  if (isImageAttachment(inferredMediaType)) {
+  if (isVisionImageAttachment(inferredMediaType)) {
     return fullPath
   }
 
   // 兼容旧版本无扩展名图片：历史剪贴板图片会以 .bin 保存，但元数据仍保留真实图片 MIME。
-  if (extension === '.bin' && mediaType && isImageAttachment(mediaType)) {
+  if (extension === '.bin' && mediaType && isVisionImageAttachment(mediaType)) {
     return fullPath
   }
 
@@ -256,7 +265,10 @@ export function saveAttachment(input: AttachmentSaveInput): AttachmentSaveResult
 }
 
 /**
- * 读取附件并返回 base64 编码
+ * 安全读取附件并返回 base64 编码。
+ *
+ * 这是 IPC/UI 的通用读取入口，只限制路径必须位于附件目录内，
+ * 不限制附件 MIME。vision 发送请使用 readImageAttachmentAsBase64。
  *
  * 支持两种路径格式：
  * 1. 相对路径 {conversationId}/{uuid}.ext → 解析到 ~/.proma/attachments/
@@ -266,7 +278,7 @@ export function saveAttachment(input: AttachmentSaveInput): AttachmentSaveResult
  * @returns base64 编码的文件数据
  */
 export function readAttachmentAsBase64(localPath: string): string {
-  const fullPath = resolveSafeImageAttachmentPath(localPath)
+  const fullPath = resolveSafeAttachmentPath(localPath)
   const buffer = readFileSync(fullPath)
   return buffer.toString('base64')
 }

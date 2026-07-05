@@ -8,7 +8,7 @@
  */
 
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 interface PackageManifest {
   name?: string
@@ -16,7 +16,31 @@ interface PackageManifest {
   optionalDependencies?: Record<string, string>
 }
 
-const EXTERNAL_RUNTIME_PACKAGES = [
+interface RuntimeDependency {
+  name: string
+  optional: boolean
+}
+
+interface SyncContext {
+  sourceNodeModules: string
+  targetNodeModules: string
+  copiedPackages: Set<string>
+  skippedOptionalPackages: string[]
+}
+
+export interface SyncRuntimeDepsOptions {
+  sourceNodeModules?: string
+  targetNodeModules?: string
+  externalRuntimePackages?: readonly string[]
+}
+
+export interface SyncRuntimeDepsResult {
+  copiedPackageCount: number
+  copiedPackages: string[]
+  skippedOptionalPackages: string[]
+}
+
+export const EXTERNAL_RUNTIME_PACKAGES: readonly string[] = [
   '@earendil-works/pi-coding-agent',
   '@earendil-works/pi-agent-core',
   '@earendil-works/pi-ai',
@@ -28,48 +52,48 @@ const STALE_CLAUDE_RUNTIME_PREFIX = 'claude-agent-sdk'
 
 const appDir = resolve(import.meta.dir, '..')
 const repoRoot = resolve(appDir, '../..')
-const sourceNodeModules = join(repoRoot, 'node_modules')
-const targetNodeModules = join(appDir, 'node_modules')
-const copiedPackages = new Set<string>()
-const skippedOptionalPackages: string[] = []
+const defaultSourceNodeModules = join(repoRoot, 'node_modules')
+const defaultTargetNodeModules = join(appDir, 'node_modules')
 
 function getPackageDir(nodeModulesDir: string, packageName: string): string {
   if (packageName.startsWith('@')) {
-    const [scope, name] = packageName.split('/')
+    const parts = packageName.split('/')
+    const scope = parts[0]
+    const name = parts[1]
+    if (!scope || !name) throw new Error(`非法 scoped package 名称: ${packageName}`)
     return join(nodeModulesDir, scope, name)
   }
   return join(nodeModulesDir, packageName)
 }
 
-function getPackageManifest(packageName: string): PackageManifest | undefined {
-  const manifestPath = join(getPackageDir(sourceNodeModules, packageName), 'package.json')
+function getPackageManifest(ctx: SyncContext, packageName: string): PackageManifest | undefined {
+  const manifestPath = join(getPackageDir(ctx.sourceNodeModules, packageName), 'package.json')
   if (!existsSync(manifestPath)) return undefined
   return JSON.parse(readFileSync(manifestPath, 'utf-8')) as PackageManifest
 }
 
-function listRuntimeDependencies(manifest: PackageManifest): Array<{ name: string; optional: boolean }> {
+function listRuntimeDependencies(manifest: PackageManifest): RuntimeDependency[] {
   const dependencies = Object.keys(manifest.dependencies ?? {}).map((name) => ({ name, optional: false }))
   const optionalDependencies = Object.keys(manifest.optionalDependencies ?? {}).map((name) => ({ name, optional: true }))
   return [...dependencies, ...optionalDependencies]
 }
 
-function copyPackage(packageName: string, optional = false): void {
-  if (copiedPackages.has(packageName)) return
+function copyPackage(ctx: SyncContext, packageName: string, optional = false): void {
+  if (ctx.copiedPackages.has(packageName)) return
 
-  const sourceDir = getPackageDir(sourceNodeModules, packageName)
-  const manifest = getPackageManifest(packageName)
+  const sourceDir = getPackageDir(ctx.sourceNodeModules, packageName)
+  const manifest = getPackageManifest(ctx, packageName)
   if (!manifest || !existsSync(sourceDir)) {
     if (optional) {
-      skippedOptionalPackages.push(packageName)
+      ctx.skippedOptionalPackages.push(packageName)
       return
     }
     throw new Error(`缺少运行时依赖: ${packageName} (${sourceDir})`)
   }
 
-  copiedPackages.add(packageName)
+  ctx.copiedPackages.add(packageName)
 
-  const targetDir = getPackageDir(targetNodeModules, packageName)
-  rmSync(targetDir, { recursive: true, force: true })
+  const targetDir = getPackageDir(ctx.targetNodeModules, packageName)
   mkdirSync(dirname(targetDir), { recursive: true })
   cpSync(sourceDir, targetDir, {
     recursive: true,
@@ -80,7 +104,7 @@ function copyPackage(packageName: string, optional = false): void {
   })
 
   for (const dependency of listRuntimeDependencies(manifest)) {
-    copyPackage(dependency.name, dependency.optional)
+    copyPackage(ctx, dependency.name, dependency.optional)
   }
 }
 
@@ -106,11 +130,11 @@ function assertNoAbsoluteSymlinks(dir: string): void {
   }
 }
 
-function listStaleClaudeRuntimePackages(): string[] {
-  if (!existsSync(targetNodeModules)) return []
+function listStaleClaudeRuntimePackages(nodeModulesDir: string): string[] {
+  if (!existsSync(nodeModulesDir)) return []
 
   const stalePackages: string[] = []
-  const stack = [targetNodeModules]
+  const stack = [nodeModulesDir]
   while (stack.length > 0) {
     const current = stack.pop()!
     for (const entry of readdirSync(current)) {
@@ -134,38 +158,60 @@ function listStaleClaudeRuntimePackages(): string[] {
   return stalePackages
 }
 
-function removeStaleClaudeRuntimePackages(): void {
-  const stalePackages = listStaleClaudeRuntimePackages()
-  for (const packageDir of stalePackages) {
-    rmSync(packageDir, { recursive: true, force: true })
-  }
-  if (stalePackages.length > 0) {
-    console.log(`[runtime-deps] 已清理 ${stalePackages.length} 个旧 Claude Agent SDK 运行时包`)
-  }
-}
-
-function assertNoStaleClaudeRuntimePackages(): void {
-  const stalePackages = listStaleClaudeRuntimePackages()
+function assertNoStaleClaudeRuntimePackages(nodeModulesDir: string): void {
+  const stalePackages = listStaleClaudeRuntimePackages(nodeModulesDir)
   if (stalePackages.length > 0) {
     throw new Error(`检测到旧 Claude Agent SDK 残留: ${stalePackages.join(', ')}`)
   }
 }
 
-function main(): void {
-  mkdirSync(targetNodeModules, { recursive: true })
-  removeStaleClaudeRuntimePackages()
-
-  for (const packageName of EXTERNAL_RUNTIME_PACKAGES) {
-    copyPackage(packageName)
+function prepareTargetNodeModules(sourceNodeModules: string, targetNodeModules: string): void {
+  const source = resolve(sourceNodeModules)
+  const target = resolve(targetNodeModules)
+  if (source === target) {
+    throw new Error('sourceNodeModules 与 targetNodeModules 不能相同，避免误删源依赖')
+  }
+  if (basename(target) !== 'node_modules') {
+    throw new Error(`拒绝清理非 node_modules 目录: ${target}`)
   }
 
-  assertNoStaleClaudeRuntimePackages()
-  assertNoAbsoluteSymlinks(targetNodeModules)
-
-  const skipped = skippedOptionalPackages.length > 0
-    ? `，跳过未安装 optional 依赖 ${skippedOptionalPackages.length} 个`
-    : ''
-  console.log(`[runtime-deps] 已同步 ${copiedPackages.size} 个主进程运行时依赖${skipped}`)
+  rmSync(target, { recursive: true, force: true })
+  mkdirSync(target, { recursive: true })
 }
 
-main()
+export function syncRuntimeDeps(options: SyncRuntimeDepsOptions = {}): SyncRuntimeDepsResult {
+  const ctx: SyncContext = {
+    sourceNodeModules: options.sourceNodeModules ?? defaultSourceNodeModules,
+    targetNodeModules: options.targetNodeModules ?? defaultTargetNodeModules,
+    copiedPackages: new Set<string>(),
+    skippedOptionalPackages: [],
+  }
+  const externalRuntimePackages = options.externalRuntimePackages ?? EXTERNAL_RUNTIME_PACKAGES
+
+  prepareTargetNodeModules(ctx.sourceNodeModules, ctx.targetNodeModules)
+
+  for (const packageName of externalRuntimePackages) {
+    copyPackage(ctx, packageName)
+  }
+
+  assertNoStaleClaudeRuntimePackages(ctx.targetNodeModules)
+  assertNoAbsoluteSymlinks(ctx.targetNodeModules)
+
+  return {
+    copiedPackageCount: ctx.copiedPackages.size,
+    copiedPackages: [...ctx.copiedPackages],
+    skippedOptionalPackages: [...ctx.skippedOptionalPackages],
+  }
+}
+
+function main(): void {
+  const result = syncRuntimeDeps()
+  const skipped = result.skippedOptionalPackages.length > 0
+    ? `，跳过未安装 optional 依赖 ${result.skippedOptionalPackages.length} 个`
+    : ''
+  console.log(`[runtime-deps] 已同步 ${result.copiedPackageCount} 个主进程运行时依赖${skipped}`)
+}
+
+if (import.meta.main) {
+  main()
+}
