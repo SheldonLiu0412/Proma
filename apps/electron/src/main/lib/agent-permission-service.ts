@@ -12,7 +12,6 @@
 
 import { randomUUID } from 'node:crypto'
 import type {
-  PromaPermissionMode,
   PermissionRequest,
   DangerLevel,
   AskUserRequest,
@@ -146,10 +145,10 @@ export class AgentPermissionService {
   private sessionWhitelists = new Map<string, SessionWhitelist>()
 
   /**
-   * 创建 canUseTool 回调（auto 模式及 escalation 场景使用）
+   * 创建 canUseTool 回调（Proma auto 模式使用）
    *
-   * SDK 的 auto 模式内置 classifier 自动处理大多数权限决策，仅在 classifier 无法判断时
-   * 才调用此回调（escalation）。返回的函数签名匹配 SDK 的 CanUseTool 类型。
+   * Pi runtime 下 auto 是 Proma 产品层语义：只读操作自动允许，写操作、
+   * 危险 Bash 或未知工具统一交给 UI 审批。
    */
   createCanUseTool(
     sessionId: string,
@@ -166,17 +165,10 @@ export class AgentPermissionService {
 
       const allow = (): PermissionResult => ({ behavior: 'allow' as const, updatedInput: input })
 
-      // Worker（子代理）的工具调用自动批准，避免 UI 等待导致超时死锁
-      if (options.agentID) {
-        return allow()
-      }
-
       // 会话白名单检查（用户之前选择了"始终允许"）
       if (this.isWhitelisted(sessionId, toolName, input)) return allow()
 
-      // auto 模式本地 classifier：只读工具（Read/Glob/Grep/WebSearch/WebFetch 及只读 Bash 命令）自动放行
-      // 原因：CLI 的 --permission-prompt-tool stdio 会把每次 tool 调用都转发给 canUseTool，
-      // SDK 的 auto classifier 对只读操作未必真的放行，这里做本地兜底避免用户被无意义的审批打扰
+      // auto 模式：只读工具和只读 Bash 命令自动放行，避免用户被无意义的审批打扰。
       if (this.isReadOnlyTool(toolName, input, knownReadOnlyToolNames)) return allow()
 
       // 需要询问用户：构建请求并发送到 UI

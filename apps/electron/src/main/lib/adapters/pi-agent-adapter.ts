@@ -118,11 +118,17 @@ interface ActivePiSession {
   rejectReady: (error: unknown) => void
   abortRequested: boolean
   interrupting: boolean
-  pendingInterruptPrompts: string[]
+  pendingInterruptPrompts: PendingInterruptPrompt[]
   interruptAbortPromise?: Promise<void>
   readySettled: boolean
   disposed: boolean
   runtimeGuard?: AgentRuntimeGuard
+}
+
+interface PendingInterruptPrompt {
+  content: string
+  resolveAccepted: () => void
+  rejectAccepted: (error: unknown) => void
 }
 
 interface PromaTaskItem {
@@ -284,6 +290,13 @@ function createAbortError(): Error {
   const error = new Error('Agent 执行已停止')
   error.name = 'AbortError'
   return error
+}
+
+function rejectPendingInterruptPrompts(active: ActivePiSession, error: unknown): void {
+  const pending = active.pendingInterruptPrompts.splice(0)
+  for (const prompt of pending) {
+    prompt.rejectAccepted(error)
+  }
 }
 
 async function waitForActiveSession(active: ActivePiSession): Promise<AgentSession> {
@@ -1666,6 +1679,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       unsubscribe = undefined
       if (!active.disposed) {
         active.disposed = true
+        rejectPendingInterruptPrompts(active, createAbortError())
         active.session?.dispose()
       }
       if (this.activeSessions.get(input.sessionId) === active) {
@@ -1920,14 +1934,30 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       } else {
         const runPromptChain = async (): Promise<void> => {
           let nextPrompt: string | undefined = appendOutputFormatInstruction(input.prompt, input.outputFormat)
+          let nextInterrupt: PendingInterruptPrompt | undefined
           while (nextPrompt !== undefined) {
+            const currentInterrupt = nextInterrupt
+            nextInterrupt = undefined
             if (runtimeGuard.shouldStopBeforeNextTurn()) {
-              active.pendingInterruptPrompts.length = 0
+              currentInterrupt?.rejectAccepted(createAbortError())
+              rejectPendingInterruptPrompts(active, createAbortError())
               return
             }
-            const prompt = await preparePromptWithPromaSkills(resourceLoader, nextPrompt, input.skillMentions)
+            let prompt: string
+            try {
+              prompt = await preparePromptWithPromaSkills(resourceLoader, nextPrompt, input.skillMentions)
+            } catch (error) {
+              currentInterrupt?.rejectAccepted(error)
+              throw error
+            }
             nextPrompt = undefined
             try {
+              if (active.abortRequested) {
+                currentInterrupt?.rejectAccepted(createAbortError())
+                rejectPendingInterruptPrompts(active, createAbortError())
+                return
+              }
+              currentInterrupt?.resolveAccepted()
               await session.prompt(prompt, { source: 'rpc' })
             } finally {
               if (active.interrupting) {
@@ -1935,12 +1965,17 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               }
               active.interrupting = false
             }
-            if (active.abortRequested) return
-            if (runtimeGuard.shouldStopBeforeNextTurn()) {
-              active.pendingInterruptPrompts.length = 0
+            if (active.abortRequested) {
+              rejectPendingInterruptPrompts(active, createAbortError())
               return
             }
-            nextPrompt = active.pendingInterruptPrompts.shift()
+            if (runtimeGuard.shouldStopBeforeNextTurn()) {
+              rejectPendingInterruptPrompts(active, createAbortError())
+              return
+            }
+            const pendingInterrupt = active.pendingInterruptPrompts.shift()
+            nextInterrupt = pendingInterrupt
+            nextPrompt = pendingInterrupt?.content
           }
         }
 
@@ -1969,6 +2004,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     const active = this.activeSessions.get(sessionId)
     if (!active) return
     active.abortRequested = true
+    rejectPendingInterruptPrompts(active, createAbortError())
     if (!active.session) rejectActiveReady(active, createAbortError())
     active.session?.abort().catch(() => {})
   }
@@ -1996,7 +2032,14 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       throw new Error(stopOverride?.errors[0] ?? 'Agent 已达到运行限制，无法继续追加消息')
     }
     if (options?.interrupt) {
-      active.pendingInterruptPrompts.push(content)
+      const accepted = new Promise<void>((resolve, reject) => {
+        active.pendingInterruptPrompts.push({
+          content,
+          resolveAccepted: resolve,
+          rejectAccepted: reject,
+        })
+      })
+      accepted.catch(() => {})
       if (session.isStreaming) {
         // Pi 没有单独的 interrupt()；公开取消 API 是 abort()。
         // 这里把 abort 产生的内部 aborted 终态压住，再由 query 的 prompt chain 发送新消息。
@@ -2007,6 +2050,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           })
         await active.interruptAbortPromise
       }
+      await accepted
+      options.onAccepted?.()
       return
     }
     if (message.priority === 'now') {
@@ -2014,6 +2059,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     } else {
       await session.followUp(content)
     }
+    options?.onAccepted?.()
   }
 
   async cancelQueuedMessage(_sessionId: string, _messageUuid: string): Promise<void> {
@@ -2028,6 +2074,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     for (const active of this.activeSessions.values()) {
       if (!active.disposed) {
         active.disposed = true
+        rejectPendingInterruptPrompts(active, createAbortError())
         active.session?.dispose()
       }
       rejectActiveReady(active, createAbortError())

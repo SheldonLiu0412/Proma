@@ -124,6 +124,19 @@ describe('Agent 会话 JSONL 读取', () => {
     expect(() => manager.truncateSDKMessages('session-truncate-bad-line', 'assistant-1'))
       .toThrow('JSONL 第 2 行解析失败')
   })
+
+  test('Given 队列消息已持久化 When runtime 拒绝接收 Then 可按 uuid 回滚该消息', () => {
+    writeAgentSessionJsonl('session-queued-rollback', [
+      JSON.stringify({ type: 'user', uuid: 'user-1', message: { content: [{ type: 'text', text: '第一轮' }] } }),
+      JSON.stringify({ type: 'assistant', uuid: 'assistant-1', message: { content: [{ type: 'text', text: '完成' }] } }),
+      JSON.stringify({ type: 'user', uuid: 'queued-1', message: { content: [{ type: 'text', text: '追加' }] } }),
+    ])
+
+    expect(manager.removeSDKMessageByUuid('session-queued-rollback', 'queued-1')).toBe(true)
+    expect(manager.getAgentSessionSDKMessages('session-queued-rollback').map((message) => (
+      'uuid' in message ? (message as { uuid?: string }).uuid : undefined
+    ))).toEqual(['user-1', 'assistant-1'])
+  })
 })
 
 describe('legacy Claude file-history 兼容', () => {
@@ -175,6 +188,48 @@ describe('legacy Claude file-history 兼容', () => {
     expect(existsSync(join(cwd, 'new.txt'))).toBe(false)
   })
 
+  test('Given legacy 快照包含越界路径 When 恢复 Then 阻断部分回退', () => {
+    const cwd = join(tempHome, 'legacy-workspace-unmapped')
+    const outside = join(tempHome, 'legacy-outside.txt')
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(cwd, 'note.txt'), 'latest', 'utf-8')
+    writeFileSync(outside, 'outside latest', 'utf-8')
+
+    const sdkProjectDir = join(configDir(), 'sdk-config', 'projects', 'project-hash')
+    const historyDir = join(configDir(), 'sdk-config', 'file-history', 'legacy-sdk-unmapped')
+    mkdirSync(sdkProjectDir, { recursive: true })
+    mkdirSync(historyDir, { recursive: true })
+    writeFileSync(join(historyDir, 'note-backup'), 'old', 'utf-8')
+    writeFileSync(join(historyDir, 'outside-backup'), 'outside old', 'utf-8')
+    writeFileSync(join(sdkProjectDir, 'legacy-sdk-unmapped.jsonl'), jsonl([
+      JSON.stringify({ type: 'assistant', uuid: 'assistant-1' }),
+      JSON.stringify({ type: 'user', uuid: 'user-2', message: { content: [{ type: 'text', text: '继续' }] } }),
+      JSON.stringify({
+        type: 'file-history-snapshot',
+        isSnapshotUpdate: false,
+        snapshot: {
+          messageId: 'user-2',
+          trackedFileBackups: {
+            'note.txt': { backupFileName: 'note-backup' },
+            [outside]: { backupFileName: 'outside-backup' },
+          },
+        },
+      }),
+    ]), 'utf-8')
+
+    const result = manager.rewindFilesFromLegacySnapshot({
+      sdkSessionIds: ['legacy-sdk-unmapped'],
+      assistantMessageUuid: 'assistant-1',
+      cwd,
+      allowedDirectories: [cwd],
+    })
+
+    expect(result.canRewind).toBe(false)
+    expect(result.error).toContain('未映射或越界路径')
+    expect(readFileSync(join(cwd, 'note.txt'), 'utf-8')).toBe('latest')
+    expect(readFileSync(outside, 'utf-8')).toBe('outside latest')
+  })
+
   test('Given 非最后一轮 fork 缺少 sidecar 且无 legacy file-history When 分叉 Then 阻断避免复制最新工作区', async () => {
     writeAgentWorkspacesIndex([
       { id: 'workspace-1', name: '测试工作区', slug: 'workspace-one', createdAt: 1, updatedAt: 1 },
@@ -202,6 +257,64 @@ describe('legacy Claude file-history 兼容', () => {
     })).rejects.toThrow('无法安全分叉旧历史点')
 
     expect(manager.listAgentSessions().map((session) => session.id)).toEqual(['source-session'])
+  })
+
+  test('Given 非最后一轮 fork 的 sidecar 不可恢复但 legacy 可用 When 分叉 Then 使用 legacy 恢复旧文件状态', async () => {
+    writeAgentWorkspacesIndex([
+      { id: 'workspace-1', name: '测试工作区', slug: 'workspace-one', createdAt: 1, updatedAt: 1 },
+    ])
+    writeAgentSessionsIndex([
+      {
+        id: 'source-session',
+        title: '源会话',
+        workspaceId: 'workspace-1',
+        legacySdkSessionId: 'legacy-sdk',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])
+    const sourceDir = join(configDir(), 'agent-workspaces', 'workspace-one', 'source-session')
+    mkdirSync(join(sourceDir, '.git'), { recursive: true })
+    writeFileSync(join(sourceDir, 'note.txt'), 'latest', 'utf-8')
+    writeAgentSessionJsonl('source-session', [
+      JSON.stringify({ type: 'assistant', uuid: 'assistant-1', message: { content: [{ type: 'text', text: '完成' }] } }),
+      JSON.stringify({ type: 'user', uuid: 'user-2', message: { content: [{ type: 'text', text: '继续' }] } }),
+    ])
+
+    const { createAgentSidecarSnapshot } = await import('./agent-sidecar-snapshot')
+    await createAgentSidecarSnapshot({
+      sessionId: 'source-session',
+      messageUuid: 'user-2',
+      roots: [sourceDir, join(sourceDir, '.git')],
+    })
+
+    const sdkProjectDir = join(configDir(), 'sdk-config', 'projects', 'project-hash')
+    const historyDir = join(configDir(), 'sdk-config', 'file-history', 'legacy-sdk')
+    mkdirSync(sdkProjectDir, { recursive: true })
+    mkdirSync(historyDir, { recursive: true })
+    writeFileSync(join(historyDir, 'note-backup'), 'old', 'utf-8')
+    writeFileSync(join(sdkProjectDir, 'legacy-sdk.jsonl'), jsonl([
+      JSON.stringify({ type: 'assistant', uuid: 'assistant-1' }),
+      JSON.stringify({ type: 'user', uuid: 'user-2', message: { content: [{ type: 'text', text: '继续' }] } }),
+      JSON.stringify({
+        type: 'file-history-snapshot',
+        isSnapshotUpdate: false,
+        snapshot: {
+          messageId: 'user-2',
+          trackedFileBackups: {
+            'note.txt': { backupFileName: 'note-backup' },
+          },
+        },
+      }),
+    ]), 'utf-8')
+
+    const fork = await manager.forkAgentSession({
+      sessionId: 'source-session',
+      upToMessageUuid: 'assistant-1',
+    })
+
+    const forkDir = join(configDir(), 'agent-workspaces', 'workspace-one', fork.id)
+    expect(readFileSync(join(forkDir, 'note.txt'), 'utf-8')).toBe('old')
   })
 
   test('Given 删除会话引用多个 SDK ID When 其它会话仍引用 legacy ID Then 只清理未引用 runtime 数据', () => {

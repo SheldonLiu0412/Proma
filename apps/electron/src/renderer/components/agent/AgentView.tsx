@@ -337,9 +337,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   // atom 输出引用未变，订阅者跳过通知。
   const streamState = useAtomValue(agentSessionStreamingStateAtomFamily(sessionId))
   const streaming = streamState?.running ?? false
-  // 软空闲态：本轮主体已结束、UI 可输入，但 SDK 通道仍开着等后台任务唤醒。
-  // 此时服务端 activeSessions 仍保留，新消息须走注入通道而非新建 run。
-  const backgroundWaiting = streamState?.backgroundWaiting ?? false
   const stoppedByUserSessions = useAtomValue(stoppedByUserSessionsAtom)
   const sendWithCmdEnter = useAtomValue(sendWithCmdEnterAtom)
   const longTextPasteAsAttachmentEnabled = useAtomValue(longTextPasteAsAttachmentEnabledAtom)
@@ -813,11 +810,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     const mentions = parseQueuedMessageMentions(text)
     clearStoppedByUser()
 
-    // interrupt 由本函数读到的实时 streaming 决定，而非调用方传入的快照：
-    // - streaming（本轮真正进行中）：注入前需软中断当前 turn
-    // - backgroundWaiting（软空闲，无活跃 turn）：直接注入，无需中断
+    // interrupt 由本函数读到的实时 streaming 决定，而非调用方传入的快照，
     // 避免"外层判定 streaming、内层已结束"两个快照不一致导致的竞态。
-    if (streaming || backgroundWaiting) {
+    if (streaming) {
       await queueMessageIntoActiveAgent(message, text, mentions, streaming)
       return
     }
@@ -825,7 +820,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     await startQueuedMessageRun(text, mentions, agentChannelId)
   }, [
     agentChannelId,
-    backgroundWaiting,
     clearStoppedByUser,
     hasAvailableModel,
     queueMessageIntoActiveAgent,
@@ -883,13 +877,12 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             // 仍在运行中：不清除
             if (!state || state.running) return prev
             const map = new Map(prev)
-            // 软空闲态（后台任务等待）：必须保留 backgroundWaiting 标志（否则 handleSend 误走新建 run），
-            // 但展示字段 content/toolActivities 仍要清空——否则上一轮流式文本残留会被兜底气泡渲染成重复消息。
+            // 清空展示字段，避免上一轮流式文本残留被兜底气泡渲染成重复消息。
             if (state.inputTokens !== undefined) {
               // 保留 usage 数据，仅清除流式展示字段
               map.set(sessionId, {
                 running: false,
-                backgroundWaiting: state.backgroundWaiting,
+                backgroundWaiting: false,
                 content: '',
                 toolActivities: [],
                 inputTokens: state.inputTokens,
@@ -898,14 +891,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                 cacheCreationTokens: state.cacheCreationTokens,
                 contextWindow: state.contextWindow,
                 model: state.model,
-              })
-            } else if (state.backgroundWaiting) {
-              // 无 usage 数据但处于软空闲：保留标志，清空展示字段
-              map.set(sessionId, {
-                running: false,
-                backgroundWaiting: true,
-                content: '',
-                toolActivities: [],
               })
             } else {
               map.delete(sessionId)
@@ -1515,45 +1500,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return
     }
 
-    if (backgroundWaiting) {
-      // 软空闲态没有活跃输出，直接注入，无需中断。
-      if (pendingFilesSnapshot.length > 0) {
-        toast.info('Agent 后台等待中暂不支持追加发送附件', {
-          description: '请等待完成后再发送附件，或先撤除附件仅发送文本',
-        })
-        return
-      }
-
-      const message = createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now())
-      if (overrideText === undefined) {
-        setInputContent('')
-        setInputHtmlContent('')
-      }
-      setPromptSuggestions((prev) => {
-        if (!prev.has(sessionId)) return prev
-        const map = new Map(prev)
-        map.delete(sessionId)
-        return map
-      })
-      sendPlainTextAgentMessage(message).catch((error) => {
-        console.error('[AgentView] 追加消息失败:', error)
-        toast.error('追加消息失败', { description: String(error) })
-        // 回滚：恢复输入框内容和建议，避免用户输入丢失
-        setInputContent(effectiveText)
-        setInputHtmlContent('')
-        setPromptSuggestions((prev) => {
-          const map = new Map(prev)
-          if (suggestion) {
-            map.set(sessionId, suggestion)
-          } else {
-            map.delete(sessionId)
-          }
-          return map
-        })
-      })
-      return
-    }
-
     // 清除当前会话的错误消息
     setAgentStreamErrors((prev) => {
       if (!prev.has(sessionId)) return prev
@@ -1780,7 +1726,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     })
-  }, [inputContent, createBaseAdditionalDirectories, sessionId, agentChannelId, agentModelId, currentWorkspaceId, workspaces, streaming, backgroundWaiting, suggestion, hasAvailableModel, hasBlockingRequests, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, sendPlainTextAgentMessage])
+  }, [inputContent, createBaseAdditionalDirectories, sessionId, agentChannelId, agentModelId, currentWorkspaceId, workspaces, streaming, suggestion, hasAvailableModel, hasBlockingRequests, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, sendPlainTextAgentMessage])
 
   /** 停止生成 */
   const handleStop = React.useCallback((): void => {

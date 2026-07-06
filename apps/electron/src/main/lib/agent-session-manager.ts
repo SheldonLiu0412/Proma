@@ -143,7 +143,7 @@ function readIndex(): AgentSessionsIndex {
   if (data) {
     if (migrateLegacyPermissionMode(data)) {
       writeIndex(data)
-      console.log('[Agent 会话] 已迁移历史权限模式 auto → bypassPermissions')
+      console.log('[Agent 会话] 已规范化历史权限模式')
     }
     return data
   }
@@ -292,6 +292,28 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
     console.error(`[Agent 会话] 追加 SDKMessage 失败 (${id}):`, error)
     throw new Error('追加 SDKMessage 失败')
   }
+}
+
+/**
+ * 从会话 JSONL 中移除指定 UUID 的 SDKMessage。
+ *
+ * 用于 queued message 已写入 Proma 历史、但 runtime 拒绝接收时回滚，避免刷新后出现
+ * 实际未进入 Agent 上下文的“幽灵消息”。
+ */
+export function removeSDKMessageByUuid(id: string, messageUuid: string): boolean {
+  const filePath = getAgentSessionMessagesPath(id)
+  if (!existsSync(filePath)) return false
+
+  const raw = readFileSync(filePath, 'utf-8')
+  const lines = raw.split('\n').filter((line) => line.trim())
+  const messages = parseJsonlStrict<unknown>(lines, `回滚读取 SDKMessage (${id})`).map(normalizePersistedSDKMessage)
+  const kept = messages.filter((message) => getStoredMessageUuid(message) !== messageUuid)
+  if (kept.length === messages.length) return false
+
+  const content = kept.map((message) => JSON.stringify(message)).join('\n') + (kept.length > 0 ? '\n' : '')
+  writeFileSync(filePath, content, 'utf-8')
+  console.log(`[Agent 会话] 已回滚消息: sessionId=${id}, uuid=${messageUuid}`)
+  return true
 }
 
 /**
@@ -911,7 +933,7 @@ async function materializeForkWorkspaceFromSidecar(input: {
     restoreUnmappedRoots: false,
   })
   if (!result.canRewind) {
-    if (isMissingSidecarError(result.error)) {
+    if (isMissingSidecarError(result.error) || legacySdkSessionIds.length > 0) {
       return materializeForkWorkspaceFromLegacy({
         legacySdkSessionIds,
         assistantMessageUuid: upToMessageUuid,
@@ -1575,8 +1597,7 @@ function prepareLegacyRestoreOperations(input: {
     const targetPath = mapLegacySnapshotPath(filePath, input.cwd, input.rootPathMap)
     const isAllowed = allowedDirectories.some((dir) => isPathInsideOrEqual(dir, targetPath))
     if (!isAllowed) {
-      console.warn(`[Agent 会话] legacy rewindFiles: 跳过未映射或越界路径 ${filePath}`)
-      continue
+      throw new Error(`legacy file-history 包含未映射或越界路径，已阻止部分回退: ${filePath}`)
     }
 
     if (backupFileName === null) {

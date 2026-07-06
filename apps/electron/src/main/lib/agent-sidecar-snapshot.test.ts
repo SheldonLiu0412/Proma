@@ -110,4 +110,31 @@ describe('Agent sidecar shared root 映射', () => {
     expect(result.canRewind).toBe(false)
     expect(readFileSync(join(oldRoot, 'note.md'), 'utf-8')).toBe('latest old root')
   })
+
+  test('Given 部分 shared root 无法映射 When 恢复快照 Then 阻断部分回退且不写入可映射 root', async () => {
+    const mappedOldRoot = join(tempHome, 'partial-mapped-old')
+    const mappedNewRoot = join(tempHome, 'partial-mapped-new')
+    const unmappedOldRoot = join(tempHome, 'partial-unmapped-old')
+    mkdirSync(mappedOldRoot, { recursive: true })
+    mkdirSync(mappedNewRoot, { recursive: true })
+    mkdirSync(unmappedOldRoot, { recursive: true })
+    writeFileSync(join(mappedOldRoot, 'note.md'), 'mapped snapshot', 'utf-8')
+    writeFileSync(join(mappedNewRoot, 'note.md'), 'mapped latest', 'utf-8')
+    writeFileSync(join(unmappedOldRoot, 'other.md'), 'unmapped snapshot', 'utf-8')
+
+    await sidecar.createAgentSidecarSnapshot({
+      sessionId: 'session-partial',
+      messageUuid: 'user-partial',
+      roots: [mappedOldRoot, unmappedOldRoot],
+    })
+
+    const result = await sidecar.restoreAgentSidecarSnapshot('session-partial', 'user-partial', {
+      rootPathMap: new Map([[resolve(mappedOldRoot), resolve(mappedNewRoot)]]),
+      restoreUnmappedRoots: false,
+    })
+
+    expect(result.canRewind).toBe(false)
+    expect(result.error).toContain('不可恢复的工作区 root')
+    expect(readFileSync(join(mappedNewRoot, 'note.md'), 'utf-8')).toBe('mapped latest')
+  })
 })

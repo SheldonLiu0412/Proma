@@ -84,4 +84,31 @@ describe('sync-runtime-deps', () => {
       externalRuntimePackages: ['root-a'],
     })).toThrow('旧 Claude Agent SDK')
   })
+
+  test('Given dev 非破坏式同步 When 目标有额外调试包 Then 保留额外内容并覆盖 runtime 依赖', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'proma-runtime-deps-dev-'))
+    const sourceNodeModules = join(tempDir, 'source', 'node_modules')
+    const targetNodeModules = join(tempDir, 'app', 'node_modules')
+
+    writePackage(sourceNodeModules, {
+      name: 'root-a',
+      dependencies: { 'dep-a': '1.0.0' },
+    })
+    writePackage(sourceNodeModules, { name: 'dep-a' })
+    writePackage(targetNodeModules, { name: 'debug-local' })
+    writePackage(targetNodeModules, { name: '@anthropic-ai/claude-agent-sdk-old' })
+
+    const result = syncRuntimeDeps({
+      sourceNodeModules,
+      targetNodeModules,
+      externalRuntimePackages: ['root-a'],
+      cleanTarget: false,
+    })
+
+    expect(existsSync(packageDir(targetNodeModules, 'debug-local'))).toBe(true)
+    expect(existsSync(packageDir(targetNodeModules, '@anthropic-ai/claude-agent-sdk-old'))).toBe(false)
+    expect(existsSync(packageDir(targetNodeModules, 'root-a'))).toBe(true)
+    expect(existsSync(packageDir(targetNodeModules, 'dep-a'))).toBe(true)
+    expect([...result.copiedPackages].sort()).toEqual(['dep-a', 'root-a'])
+  })
 })
