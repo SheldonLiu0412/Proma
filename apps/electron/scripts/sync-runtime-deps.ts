@@ -32,6 +32,8 @@ export interface SyncRuntimeDepsOptions {
   sourceNodeModules?: string
   targetNodeModules?: string
   externalRuntimePackages?: readonly string[]
+  /** 是否在同步前清空目标 node_modules；打包需要 true，开发启动使用 false 避免破坏本地调试内容。 */
+  cleanTarget?: boolean
 }
 
 export interface SyncRuntimeDepsResult {
@@ -165,6 +167,12 @@ function assertNoStaleClaudeRuntimePackages(nodeModulesDir: string): void {
   }
 }
 
+function removeStaleClaudeRuntimePackages(nodeModulesDir: string): void {
+  for (const stalePackage of listStaleClaudeRuntimePackages(nodeModulesDir)) {
+    rmSync(stalePackage, { recursive: true, force: true })
+  }
+}
+
 function prepareTargetNodeModules(sourceNodeModules: string, targetNodeModules: string): void {
   const source = resolve(sourceNodeModules)
   const target = resolve(targetNodeModules)
@@ -188,7 +196,20 @@ export function syncRuntimeDeps(options: SyncRuntimeDepsOptions = {}): SyncRunti
   }
   const externalRuntimePackages = options.externalRuntimePackages ?? EXTERNAL_RUNTIME_PACKAGES
 
-  prepareTargetNodeModules(ctx.sourceNodeModules, ctx.targetNodeModules)
+  if (options.cleanTarget ?? true) {
+    prepareTargetNodeModules(ctx.sourceNodeModules, ctx.targetNodeModules)
+  } else {
+    const source = resolve(ctx.sourceNodeModules)
+    const target = resolve(ctx.targetNodeModules)
+    if (source === target) {
+      throw new Error('sourceNodeModules 与 targetNodeModules 不能相同，避免覆盖源依赖')
+    }
+    if (basename(target) !== 'node_modules') {
+      throw new Error(`拒绝同步到非 node_modules 目录: ${target}`)
+    }
+    mkdirSync(target, { recursive: true })
+    removeStaleClaudeRuntimePackages(target)
+  }
 
   for (const packageName of externalRuntimePackages) {
     copyPackage(ctx, packageName)
@@ -205,7 +226,7 @@ export function syncRuntimeDeps(options: SyncRuntimeDepsOptions = {}): SyncRunti
 }
 
 function main(): void {
-  const result = syncRuntimeDeps()
+  const result = syncRuntimeDeps({ cleanTarget: !process.argv.includes('--no-clean') })
   const skipped = result.skippedOptionalPackages.length > 0
     ? `，跳过未安装 optional 依赖 ${result.skippedOptionalPackages.length} 个`
     : ''

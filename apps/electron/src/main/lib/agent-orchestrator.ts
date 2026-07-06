@@ -21,7 +21,6 @@ import { existsSync } from 'node:fs'
 import type { AgentSendInput, AgentMessage, AgentGenerateTitleInput, AgentProviderAdapter, AgentSessionMeta, TypedError, RetryAttempt, SDKMessage, SDKAssistantMessage, AgentStreamPayload, RewindSessionResult } from '@proma/shared'
 import {
   PROMA_DEFAULT_PERMISSION_MODE,
-  PROMA_PERMISSION_MODE_CONFIG,
   THINKING_SIGNATURE_ERROR_CODE,
   THINKING_SIGNATURE_ERROR_MESSAGE,
   THINKING_SIGNATURE_ERROR_TITLE,
@@ -38,7 +37,7 @@ import { decryptApiKey, getChannelById, listChannels } from './channel-manager'
 import { getAdapter, fetchTitle } from '@proma/core'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
-import { appendSDKMessages, updateAgentSessionMeta, getAgentSessionMeta, getAgentSessionMessages, getAgentSessionSDKMessages, truncateSDKMessages, resolveRewindUserMessageUuid, rewindFilesFromLegacySnapshot, type LegacyFileHistoryRestoreResult } from './agent-session-manager'
+import { appendSDKMessages, updateAgentSessionMeta, getAgentSessionMeta, getAgentSessionMessages, getAgentSessionSDKMessages, truncateSDKMessages, resolveRewindUserMessageUuid, rewindFilesFromLegacySnapshot, removeSDKMessageByUuid, type LegacyFileHistoryRestoreResult } from './agent-session-manager'
 import { getAgentWorkspace, getWorkspaceMcpConfig, getWorkspaceAutoMemoryDir, getWorkspaceAttachedDirectories, getWorkspaceAttachedFiles, getWorkspaceSkills, listAgentWorkspaces } from './agent-workspace-manager'
 import { getAgentSessionMessagesPath, getAgentSessionsDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getSdkConfigDir, getWorkspaceFilesDir, getWorkspaceSkillsDir, getBundledCliPath, resolveWorkspaceFilesDir } from './config-paths'
 import { getRuntimeStatus } from './runtime-init'
@@ -484,13 +483,13 @@ function isMissingSidecarError(error?: string): boolean {
 export class AgentOrchestrator {
   private adapter: AgentProviderAdapter
   private eventBus: AgentEventBus
-  private activeSessions = new Map<string, number>()
+  private activeSessions = new Map<string, symbol>()
 
   /** 队列消息本地记录（sessionId → UUID 集合，用于防重） */
   private queuedMessageUuids = new Map<string, Set<string>>()
 
-  /** 被用户手动中止的会话集合（在 stop 中标记，catch block 中消费） */
-  private stoppedBySessions = new Set<string>()
+  /** 被用户手动中止的运行 token 集合（在 stop 中标记，终态路径中消费） */
+  private stoppedRunTokens = new Set<symbol>()
 
   /** 运行中会话的当前权限模式（支持运行时动态切换） */
   private sessionPermissionModes = new Map<string, PromaPermissionMode>()
@@ -506,9 +505,9 @@ export class AgentOrchestrator {
    * SDK 在 query.close() 后不一定走异常路径：某些版本会先正常 yield result 再结束迭代。
    * 因此停止标记必须在所有终态路径统一消费，而不能只依赖 catch 块。
    */
-  private consumeStoppedByUser(sessionId: string): boolean {
-    const stoppedByUser = this.stoppedBySessions.has(sessionId)
-    this.stoppedBySessions.delete(sessionId)
+  private consumeStoppedByUser(runToken: symbol): boolean {
+    const stoppedByUser = this.stoppedRunTokens.has(runToken)
+    this.stoppedRunTokens.delete(runToken)
     return stoppedByUser
   }
 
@@ -861,16 +860,20 @@ export class AgentOrchestrator {
     // 2.1 立即抢占会话槽位（在所有同步检查通过后、第一个 await 之前）
     // 防止首个 await 期间并发调用绕过上方的检查，导致多条重复消息写入 JSONL
     // finally 块会通过 generation 匹配来安全清理，不影响正常流程
-    const runGeneration = Date.now()
+    const runToken = Symbol(sessionId)
     // 优先使用渲染进程传来的 startedAt（确保 STREAM_COMPLETE 竞态保护比较的是同一个值），
-    // 否则用本地 runGeneration 作为回退（headless 模式等无渲染进程场景）
-    const streamStartedAt = input.startedAt ?? runGeneration
-    this.activeSessions.set(sessionId, runGeneration)
+    // 否则用本地时间戳作为回退（headless 模式等无渲染进程场景）。
+    const streamStartedAt = input.startedAt ?? Date.now()
+    this.activeSessions.set(sessionId, runToken)
 
+    const hasNewerRun = (): boolean => {
+      const activeRun = this.activeSessions.get(sessionId)
+      return activeRun !== undefined && activeRun !== runToken
+    }
     const releaseActiveRun = (): void => {
       // 在发送 STREAM_COMPLETE 前释放 active slot，避免渲染进程已进入空闲态、
       // 主进程仍在 finally 前短暂拒绝下一条消息。
-      if (this.activeSessions.get(sessionId) !== runGeneration) return
+      if (this.activeSessions.get(sessionId) !== runToken) return
       this.activeSessions.delete(sessionId)
       this.sessionPermissionModes.delete(sessionId)
       this.queuedMessageUuids.delete(sessionId)
@@ -1092,6 +1095,7 @@ export class AgentOrchestrator {
       // 权限模式只属于当前 session；新会话默认完全自动模式。
       const appSettings = getSettings()
       const initialPermissionMode: PromaPermissionMode = permissionModeOverride
+        ?? sessionMeta?.permissionMode
         ?? PROMA_DEFAULT_PERMISSION_MODE
       // 注册到 Map，支持运行中动态切换
       this.sessionPermissionModes.set(sessionId, initialPermissionMode)
@@ -1147,6 +1151,16 @@ export class AgentOrchestrator {
 
       /** Plan 模式是否已被 Agent 进入（初始 plan 模式时天然为 true，其他模式需 EnterPlanMode 触发） */
       let planModeEntered = initialPermissionMode === 'plan'
+
+      const autoCanUseTool = permissionService.createCanUseTool(
+        sessionId,
+        (request: PermissionRequest) => {
+          this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'permission_request', request } })
+        },
+        undefined,
+        undefined,
+        readOnlyExternalTools,
+      )
 
       const syncPlanModeFromToolUse = (toolName: string): void => {
         if (toolName === 'EnterPlanMode') {
@@ -1243,6 +1257,9 @@ export class AgentOrchestrator {
         }
 
         switch (currentMode) {
+          case 'auto':
+            return autoCanUseTool(toolName, input, options)
+
           case 'bypassPermissions':
             return { behavior: 'allow' as const, updatedInput: input }
 
@@ -1401,6 +1418,15 @@ export class AgentOrchestrator {
         !!(existingSdkSessionId || capturedSdkSessionId || queryOptions.resumeSessionId)
 
       const queryStartedAt = Date.now()
+      const isCurrentRunActive = (): boolean => this.activeSessions.get(sessionId) === runToken
+      const completeStoppedRun = (): void => {
+        const wasStoppedByUser = this.consumeStoppedByUser(runToken)
+        this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
+        if (!hasNewerRun()) {
+          try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
+        }
+        completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
+      }
 
       for (let attempt = 1; attempt <= MAX_AUTO_RETRIES + 1; attempt++) {
         // 非首次尝试：等待 + 发送重试事件到 UI
@@ -1442,11 +1468,8 @@ export class AgentOrchestrator {
             await new Promise((r) => setTimeout(r, delayMs))
 
             // 等待期间如果会话被中止，退出
-            if (!this.activeSessions.has(sessionId)) {
-              const wasStoppedByUser = this.consumeStoppedByUser(sessionId)
-              this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
-              try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
-              completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
+            if (!isCurrentRunActive()) {
+              completeStoppedRun()
               return
             }
           }
@@ -1455,6 +1478,11 @@ export class AgentOrchestrator {
         let shouldRetryFromError = false
 
         try {
+          if (!isCurrentRunActive()) {
+            completeStoppedRun()
+            return
+          }
+
           // 获取异步迭代器（手动 .next() 以支持 Promise.race 中断）
           const queryIterable = this.adapter.query(queryOptions)
           const queryIterator = queryIterable[Symbol.asyncIterator]()
@@ -1504,11 +1532,9 @@ export class AgentOrchestrator {
             const msgRecord = msg as Record<string, unknown>
             const isPartialMessage = isPartialSDKMessage(msg)
 
-            if (!this.activeSessions.has(sessionId)) {
-              const wasStoppedByUser = this.consumeStoppedByUser(sessionId)
-              this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
-              try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
-              completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
+            if (!isCurrentRunActive()) {
+              await queryIterator.return?.(undefined as never).catch(() => {})
+              completeStoppedRun()
               return
             }
 
@@ -1809,7 +1835,7 @@ export class AgentOrchestrator {
             continue
           }
 
-          const wasStoppedByUser = this.consumeStoppedByUser(sessionId)
+          const wasStoppedByUser = this.consumeStoppedByUser(runToken)
 
           // 正常完成 — 如果之前有可见重试，发送 retry_cleared
           if (!wasStoppedByUser && retryAttemptsScheduled > RETRY_VISIBILITY_THRESHOLD) {
@@ -1821,10 +1847,12 @@ export class AgentOrchestrator {
           // 15. 持久化 assistant 消息
           this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
 
-          try { updateAgentSessionMeta(sessionId, wasStoppedByUser ? { stoppedByUser: true } : {}) } catch { /* 忽略 */ }
+          if (!hasNewerRun()) {
+            try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 忽略 */ }
+          }
 
           // Plan 模式：Agent 完成规划后注入"接受计划"建议
-          if (initialPermissionMode === 'plan' && planModeEntered && this.activeSessions.has(sessionId)) {
+          if (initialPermissionMode === 'plan' && planModeEntered && isCurrentRunActive()) {
             this.eventBus.emit(sessionId, {
               kind: 'sdk_message',
               message: { type: 'prompt_suggestion', suggestion: '请执行该计划' } as unknown as SDKMessage,
@@ -1848,13 +1876,9 @@ export class AgentOrchestrator {
           }
 
           // 用户主动中止
-          if (!this.activeSessions.has(sessionId)) {
-            const wasStoppedByUser = this.consumeStoppedByUser(sessionId)
+          if (!isCurrentRunActive()) {
             console.log(`[Agent 编排] 会话 ${sessionId} 已被用户中止`)
-            this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
-            // 持久化中断状态到会话 meta
-            try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
-            completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
+            completeStoppedRun()
             return
           }
 
@@ -2105,10 +2129,12 @@ export class AgentOrchestrator {
       }))
       // 只在 generation 匹配时才清理，防止旧流的 finally 误删新流的注册
       releaseActiveRun()
-      permissionService.clearSessionPending(sessionId)
-      // askUserService 不在 turn 结束时清理——AskUserQuestion 的生命周期由用户交互决定，
-      // 仅在会话真正删除时（DELETE_SESSION IPC）才清理。
-      exitPlanService.clearSessionPending(sessionId)
+      if (!this.activeSessions.has(sessionId)) {
+        permissionService.clearSessionPending(sessionId)
+        // askUserService 不在 turn 结束时清理——AskUserQuestion 的生命周期由用户交互决定，
+        // 仅在会话真正删除时（DELETE_SESSION IPC）才清理。
+        exitPlanService.clearSessionPending(sessionId)
+      }
     }
   }
 
@@ -2119,10 +2145,13 @@ export class AgentOrchestrator {
    * 再调用 adapter.abort() 中止底层 SDK 进程。
    */
   stop(sessionId: string): void {
+    const runToken = this.activeSessions.get(sessionId)
     this.activeSessions.delete(sessionId)
     this.sessionPermissionModes.delete(sessionId)
-    this.stoppedBySessions.add(sessionId)
+    if (runToken) this.stoppedRunTokens.add(runToken)
     this.queuedMessageUuids.delete(sessionId)
+    permissionService.clearSessionPending(sessionId)
+    exitPlanService.clearSessionPending(sessionId)
     this.adapter.abort(sessionId)
     console.log(`[Agent 编排] 已中止会话: ${sessionId}`)
   }
@@ -2365,6 +2394,7 @@ export class AgentOrchestrator {
     // 即便 activeSessions 为空，也要调 dispose 清理可能残留的 pidMap / 子进程
     this.adapter.dispose()
     this.activeSessions.clear()
+    this.stoppedRunTokens.clear()
     this.sessionPermissionModes.clear()
     this.queuedMessageUuids.clear()
   }
@@ -2443,6 +2473,7 @@ export class AgentOrchestrator {
       session_id: sessionId,
     }
 
+    let acceptedByRuntime = false
     try {
       // 先持久化到 JSONL，再注入 runtime，避免 Pi 已接收但 Proma 历史缺消息。
       const persistMsg: SDKMessage = {
@@ -2474,11 +2505,21 @@ export class AgentOrchestrator {
       // 普通 now 优先级仍由 adapter.sendQueuedMessage → session.steer() 处理。
       await this.adapter.sendQueuedMessage(sessionId, sdkMessage, {
         interrupt: opts?.interrupt === true,
+        onAccepted: () => {
+          acceptedByRuntime = true
+        },
         ...(mentionedSkillNames.length > 0 && { skillMentions: mentionedSkillNames }),
       })
       console.log(`[Agent 编排] 追加消息已注入: sessionId=${sessionId}, uuid=${uuid}, interrupt=${!!opts?.interrupt}`)
     } catch (error) {
       uuids.delete(uuid)
+      if (!acceptedByRuntime) {
+        try {
+          removeSDKMessageByUuid(sessionId, uuid)
+        } catch (rollbackError) {
+          console.warn('[Agent 编排] 回滚队列消息持久化失败:', rollbackError)
+        }
+      }
       throw error
     }
 

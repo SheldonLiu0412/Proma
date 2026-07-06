@@ -593,7 +593,7 @@ export interface AgentSessionMeta {
   completedButUnconfirmed?: boolean
   /** 最后一次流式执行是否被用户主动中断 */
   stoppedByUser?: boolean
-  /** 该会话当前的权限模式（持久化到磁盘，重启后恢复）。未设置时新会话默认 auto */
+  /** 该会话当前的权限模式（持久化到磁盘，重启后恢复）。未设置时使用当前默认模式 */
   permissionMode?: PromaPermissionMode
   /** 来源定时任务 ID（该会话由定时任务自动创建/复用时标记，用于侧栏显示钟表图标 + 跳转设置） */
   sourceAutomationId?: string
@@ -1070,8 +1070,8 @@ export interface AgentStreamCompletePayload {
   /** SDK result 消息携带的错误详情（error_during_execution 等场景下的真实错误原因，用于展示具体错误） */
   resultErrors?: string[]
   /**
-   * 旧 SDK 后台任务兼容态：本轮主体结束但仍有后台任务/定时任务在飞行。
-   * Pi runtime 不再通过保活通道等待 task_notification 自动续轮；新路径应使用 Proma automation / collaboration。
+   * 旧 SDK 后台任务兼容字段。
+   * Pi runtime 不再通过保活通道等待 task_notification 自动续轮；渲染进程会按普通完成处理。
    */
   backgroundTasksPending?: boolean
 }
@@ -1278,8 +1278,8 @@ export interface ExitPlanModeResponse {
 
 // ===== 权限系统类型 =====
 
-/** 当前 Proma 支持的权限模式，值直接映射 SDK 原生 permissionMode */
-export const PROMA_PERMISSION_MODES = ['bypassPermissions', 'plan'] as const
+/** 当前 Proma 支持的权限模式 */
+export const PROMA_PERMISSION_MODES = ['auto', 'bypassPermissions', 'plan'] as const
 
 export type PromaPermissionMode = typeof PROMA_PERMISSION_MODES[number]
 
@@ -1294,6 +1294,11 @@ export interface PromaPermissionModeConfig {
 
 /** Proma 权限模式的单一配置来源 */
 export const PROMA_PERMISSION_MODE_CONFIG = {
+  auto: {
+    sdkMode: 'auto',
+    label: '自动审批',
+    description: '只读操作自动允许，危险操作需要确认',
+  },
   bypassPermissions: {
     sdkMode: 'bypassPermissions',
     label: '完全自动',
@@ -1313,7 +1318,7 @@ export function isPromaPermissionMode(mode: string): mode is PromaPermissionMode
   return (PROMA_PERMISSION_MODES as readonly string[]).includes(mode)
 }
 
-/** 规范化权限模式：历史 auto 或其它非法值统一回到默认完全自动模式 */
+/** 规范化权限模式：保留历史 auto；其它非法值统一回到默认模式 */
 export function migratePermissionMode(mode: string): PromaPermissionMode {
   if (isPromaPermissionMode(mode)) return mode
   return PROMA_DEFAULT_PERMISSION_MODE

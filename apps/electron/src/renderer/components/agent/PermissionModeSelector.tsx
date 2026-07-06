@@ -8,7 +8,7 @@
 
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { Zap, Map as MapIcon } from 'lucide-react'
+import { ShieldCheck, Zap, Map as MapIcon } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { agentPermissionModeMapAtom, agentDefaultPermissionModeAtom, sessionPersistedPermissionModeAtom, sessionExistsAtom, agentPlanModeSessionsAtom } from '@/atoms/agent-atoms'
@@ -18,6 +18,7 @@ import { getDisplayedPermissionMode, updatePlanModeSessionSet } from '@/lib/agen
 import { inputToolbarButtonClass } from '@/components/ai-elements/input-toolbar-styles'
 
 const MODE_ICONS: Record<PromaPermissionMode, React.ComponentType<{ className?: string }>> = {
+  auto: ShieldCheck,
   bypassPermissions: Zap,
   plan: MapIcon,
 }

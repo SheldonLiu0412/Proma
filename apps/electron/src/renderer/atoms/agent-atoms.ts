@@ -851,8 +851,10 @@ export function applyAgentEvent(
     }
 
     case 'run_resumed':
-      // 后台任务完成自动唤醒：从"空闲可输入"恢复到运行态（防御性，监听器已显式处理）。
-      return { ...prev, running: true, backgroundWaiting: false }
+      // 仅兼容历史软空闲态；Pi runtime 不再支持旧后台等待自动续轮。
+      return prev.backgroundWaiting
+        ? { ...prev, running: true, backgroundWaiting: false }
+        : prev
 
     case 'typed_error':
       // 处理类型化错误（TypedError）
@@ -961,6 +963,14 @@ export function applyAgentEvent(
     default:
       return prev
   }
+}
+
+export function shouldApplyStreamComplete(
+  current: AgentStreamState | undefined,
+  completedStartedAt?: number,
+): current is AgentStreamState {
+  if (!current || (!current.running && !current.backgroundWaiting)) return false
+  return !(current.startedAt != null && (completedStartedAt == null || current.startedAt > completedStartedAt))
 }
 
 /** 上下文使用量状态 */

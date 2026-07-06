@@ -974,6 +974,10 @@ export async function restoreAgentSidecarSnapshot(
     )).length
     const skippedRoots = explicitSkippedRoots + unmappedSkippedRoots
 
+    if (skippedRoots > 0) {
+      throw new Error(`Proma sidecar 快照存在 ${skippedRoots} 个不可恢复的工作区 root，已阻止部分回退`)
+    }
+
     if (meta.roots.length > 0 && restoreTargets.length === 0 && explicitSkippedRoots < meta.roots.length) {
       throw new Error('Proma sidecar 快照没有可恢复到当前会话的工作区 root')
     }

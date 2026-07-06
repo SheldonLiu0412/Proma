@@ -731,6 +731,7 @@ export async function buildAgentCollaborationTools(ctx: CollaborationToolContext
     Type.Literal('custom'),
   ])
   const permissionMode = Type.Union([
+    Type.Literal('auto'),
     Type.Literal('plan'),
     Type.Literal('bypassPermissions'),
   ])

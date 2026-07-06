@@ -23,6 +23,8 @@ export interface SendQueuedMessageOptions {
   interrupt?: boolean
   /** 当前用户输入显式引用的 Skill name（兼容历史 slug 已在编排层归一化） */
   skillMentions?: string[]
+  /** runtime/adapter 已接收消息后回调；用于调用方区分失败时是否可回滚本地历史 */
+  onAccepted?: () => void
 }
 
 /**
