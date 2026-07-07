@@ -2,6 +2,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
 const FORK_WORKSPACE_COPY_BLOCKLIST = new Set([
+  '.agents',
   '.claude',
   '.DS_Store',
   '.git',

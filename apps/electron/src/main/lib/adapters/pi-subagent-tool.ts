@@ -20,6 +20,7 @@ import type { AgentSession, AgentSessionEvent, ResourceLoader, ToolDefinition } 
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
 import type { SDKMessage } from '@proma/shared'
 import type { PiAgentQueryOptions, PiRemoteConnectionSettings } from './pi-agent-adapter'
+import { createPromaAgentsFilesOverride } from './pi-resource-loader-overrides'
 import type { AgentRuntimeGuard } from '../agent-runtime-guards'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
@@ -213,6 +214,7 @@ export function createSubagentToolDefinition(deps: SubagentToolDeps): ToolDefini
         noSkills: true,
         additionalSkillPaths: parentInput.additionalSkillPaths ?? [],
         skillsOverride: deps.createSkillsOverride(parentInput.additionalSkillPaths),
+        agentsFilesOverride: createPromaAgentsFilesOverride(),
         systemPromptOverride: () => childSystemPrompt,
       })
       await resourceLoader.reload()

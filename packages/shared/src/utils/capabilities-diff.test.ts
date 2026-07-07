@@ -12,7 +12,7 @@ function makeCaps(
     builtinMcpServers: [],
     skills: skills.map((s) => ({ ...s })),
     memory: {
-      claudeMd: { exists: false, path: '', size: 0 },
+      agentsMd: { exists: false, path: '', size: 0 },
       autoMemory: { directory: '', memoryMdExists: false, fileCount: 0, totalSize: 0 },
     },
   }
@@ -30,6 +30,19 @@ describe('diffCapabilities', () => {
   test('两个空 capabilities 返回空数组', () => {
     const empty = makeCaps()
     expect(diffCapabilities(empty, empty)).toEqual([])
+  })
+
+  test('仅工作区记忆摘要变化不产生能力变更提示', () => {
+    const prev = makeCaps()
+    const next: WorkspaceCapabilities = {
+      ...prev,
+      memory: {
+        agentsMd: { exists: true, path: '/tmp/AGENTS.md', size: 42 },
+        autoMemory: { directory: '/tmp/.agents/memory', memoryMdExists: true, fileCount: 2, totalSize: 128 },
+      },
+    }
+
+    expect(diffCapabilities(prev, next)).toEqual([])
   })
 
   // --- MCP 服务器 ---

@@ -421,7 +421,7 @@ function collectRuntimeAdditionalDirectories(params: {
   }
 
   if (params.workspaceSlug) {
-    // 允许 Agent 读取工作区根的 CLAUDE.md、.context/、.claude/memory/ 和 skills/。
+    // 允许 Agent 读取工作区根的 AGENTS.md、.context/、.agents/memory/ 和 skills/。
     // 这些目录不进入 sidecar 快照，避免每轮复制整棵工作区。
     push(getAgentWorkspacePath(params.workspaceSlug))
   }
