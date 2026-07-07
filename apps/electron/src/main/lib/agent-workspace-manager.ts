@@ -912,20 +912,11 @@ function ensureTrailingNewline(content: string): string {
 }
 
 function buildMigratedClaudeBlock(content: string, contentAlreadyPresent: boolean): string {
-  const body = contentAlreadyPresent
-    ? '旧 CLAUDE.md 内容已存在于 AGENTS.md，Proma 仅记录本次路径迁移。'
-    : content.trimEnd()
+  if (contentAlreadyPresent) {
+    return [MIGRATED_CLAUDE_BLOCK_START, MIGRATED_CLAUDE_BLOCK_END, ''].join('\n')
+  }
 
-  return [
-    MIGRATED_CLAUDE_BLOCK_START,
-    '## 迁移自 CLAUDE.md',
-    '',
-    '以下内容由 Proma 从旧版 CLAUDE.md 一次性迁移。迁移完成后，请继续维护 AGENTS.md；旧 CLAUDE.md 不再作为 Proma 的项目指令来源。',
-    '',
-    body,
-    MIGRATED_CLAUDE_BLOCK_END,
-    '',
-  ].join('\n')
+  return [MIGRATED_CLAUDE_BLOCK_START, content.trimEnd(), MIGRATED_CLAUDE_BLOCK_END, ''].join('\n')
 }
 
 function fileContentsEqual(leftPath: string, rightPath: string): boolean {
@@ -1295,8 +1286,7 @@ const AUTO_MEMORY_CONTEXT_MAX_BYTES = 64 * 1024
  * MEMORY.md 索引置顶，其余主题文件按路径排序追加，每个文件前加 `### 相对路径` 标题。
  * 超过 AUTO_MEMORY_CONTEXT_MAX_BYTES 预算后停止追加并给出提示，剩余文件靠 Read 按需读取。
  *
- * 背景：迁移前 Claude SDK 通过 autoMemoryDirectory 设置原生把该目录注入上下文；
- * Pi SDK 无 memory 概念，改由 Proma 在 buildDynamicContext 中主动注入以保持等价效果。
+ * Pi SDK 无 memory 概念，Proma 在 buildDynamicContext 中主动注入该目录内容。
  *
  * @returns 拼好的记忆正文；目录不存在或无有效文本内容时返回 undefined。
  */

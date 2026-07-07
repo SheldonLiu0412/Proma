@@ -39,9 +39,9 @@ describe('工作区记忆一次性迁移', () => {
     expect(first.agentsMdMigrated).toBe(true)
     expect(second.agentsMdMigrated).toBe(false)
     expect(agents).toContain('<!-- proma:migrated-from-claude-md:start -->')
-    expect(agents).toContain('## 迁移自 CLAUDE.md')
     expect(agents).toContain('- 使用 Bun')
     expect(agents.match(/proma:migrated-from-claude-md:start/g)?.length).toBe(1)
+    expect(agents).not.toContain('旧 CLAUDE.md')
     expect(existsSync(join(root, 'CLAUDE.md'))).toBe(true)
   })
 
@@ -55,8 +55,8 @@ describe('工作区记忆一次性迁移', () => {
 
     expect(result.agentsMdMigrated).toBe(true)
     expect(agents.startsWith('# 当前项目规则')).toBe(true)
-    expect(agents).toContain('## 迁移自 CLAUDE.md')
     expect(agents).toContain('- 历史约束')
+    expect(agents).not.toContain('旧 CLAUDE.md')
   })
 
   test('Given AGENTS.md 已包含旧内容 When 迁移 CLAUDE.md Then 只追加 marker 不重复正文', () => {
@@ -68,7 +68,9 @@ describe('工作区记忆一次性迁移', () => {
     const agents = readText(join(root, 'AGENTS.md'))
 
     expect(agents.match(/- 历史约束/g)?.length).toBe(1)
-    expect(agents).toContain('Proma 仅记录本次路径迁移')
+    expect(agents).toContain('<!-- proma:migrated-from-claude-md:start -->')
+    expect(agents).not.toContain('旧 CLAUDE.md')
+    expect(agents).not.toContain('路径迁移')
   })
 
   test('Given 新旧 auto memory 有同名冲突 When 迁移 Then 不覆盖新文件并归档旧冲突内容', () => {

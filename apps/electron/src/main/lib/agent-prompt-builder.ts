@@ -390,8 +390,7 @@ export function buildDynamicContext(ctx: DynamicContext): string {
     }
 
     // auto memory（.agents/memory/）实时注入
-    // 背景：迁移前 Claude SDK 通过 autoMemoryDirectory 原生把该目录注入上下文；
-    // Pi SDK 无 memory 概念，改由此处每条消息实时读取磁盘注入，保持跨会话记忆等价效果。
+    // Pi SDK 无 memory 概念，Proma 在这里每条消息实时读取磁盘注入，保持跨会话记忆可见。
     const memoryBlock = buildAutoMemoryContextBlock(ctx.workspaceSlug)
     if (memoryBlock) {
       sections.push(`<workspace_memory>\n以下是本工作区的 auto memory（\`.agents/memory/\`，跨会话自动记忆，每条消息实时读取）。把它作为背景知识，遇到与之相关的任务时主动参考；发现有稳定价值的新经验时用 \`write\` 更新对应文件。\n\n${memoryBlock}\n</workspace_memory>`)
