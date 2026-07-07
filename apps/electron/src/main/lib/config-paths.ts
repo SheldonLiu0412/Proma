@@ -12,12 +12,12 @@ import { homedir } from 'node:os'
 /**
  * 获取配置目录名称
  *
- * 开发模式下返回 '.proma-dev'，正式版本返回 '.proma'。
- *
  * 检测优先级：
- * 1. PROMA_DEV=1 环境变量（显式覆盖）
- * 2. Electron app.isPackaged（未打包 = 开发模式）
- * 3. 兜底 '.proma'
+ * 1. PROMA_DEV=1 环境变量（显式覆盖） → '.proma-dev'
+ * 2. 打包版且 package name 包含 'sdk-dev' → '.proma-sdk-dev'（SDK 迁移版独立数据目录）
+ * 3. Electron app.isPackaged → '.proma'（正式版）
+ * 4. 未打包（开发模式） → '.proma-dev'
+ * 5. 兜底 → '.proma'
  */
 let _configDirName: string | undefined
 
@@ -28,12 +28,21 @@ export function getConfigDirName(): string {
     } else {
       try {
         const { app } = require('electron')
-        _configDirName = app.isPackaged ? '.proma' : '.proma-dev'
+        if (app.isPackaged && app.name?.includes('sdk-dev')) {
+          _configDirName = '.proma-sdk-dev'
+        } else {
+          _configDirName = app.isPackaged ? '.proma' : '.proma-dev'
+        }
       } catch {
         _configDirName = '.proma'
       }
     }
-    const mode = _configDirName === '.proma-dev' ? '开发模式' : '正式版本'
+    const modeMap: Record<string, string> = {
+      '.proma-dev': '开发模式',
+      '.proma-sdk-dev': 'SDK 迁移版',
+      '.proma': '正式版本',
+    }
+    const mode = modeMap[_configDirName] ?? _configDirName
     console.log(`[配置] 配置目录: ~/${_configDirName}/（${mode}）`)
   }
   return _configDirName

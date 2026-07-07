@@ -14,7 +14,7 @@ mock.module('./agent-workspace-manager', () => ({
 const { buildSystemPrompt, buildDynamicContext } = await import('./agent-prompt-builder')
 
 describe('Agent 系统提示词构建', () => {
-  test('Given Pi SDK 迁移后的提示词 When 构建系统提示词 Then 不再宣称不存在的审查 Slash 能力', () => {
+  test('Given Pi SDK 提示词 When 构建系统提示词 Then 不再宣称不存在的审查 Slash 能力', () => {
     const prompt = buildSystemPrompt({
       sessionId: 'session-test',
       permissionMode: 'auto',
@@ -48,6 +48,9 @@ describe('Agent 系统提示词构建', () => {
     expect(prompt).toContain('工作区根目录下的 `AGENTS.md`')
     expect(prompt).not.toContain('AGENTS.md / CLAUDE.md')
     expect(prompt).not.toContain('CLAUDE.md')
+    expect(prompt).not.toContain('只作为版本迁移')
+    expect(prompt).not.toContain('迁移完成')
+    expect(prompt).not.toContain('旧项目指令')
   })
 
   test('Given 工作区存在 auto memory When 构建动态上下文 Then 注入 .agents/memory 内容', () => {
