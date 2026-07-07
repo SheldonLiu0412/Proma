@@ -87,7 +87,7 @@ import {
   workspaceAttachedDirectoriesMapAtom,
   workspaceAttachedFilesMapAtom,
   liveMessagesMapAtom,
-  agentThinkingAtom,
+  agentThinkingLevelAtom,
   stoppedByUserSessionsAtom,
   agentPlanModeSessionsAtom,
   agentPermissionModeMapAtom,
@@ -109,7 +109,7 @@ import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
-import type { AgentSendInput, AgentPendingFile, FileDialogLargeFile, ModelOption, SDKMessage, SDKUserMessage } from '@proma/shared'
+import type { AgentPendingFile, AgentSendInput, AgentThinkingLevel, FileDialogLargeFile, ModelOption, SDKMessage, SDKUserMessage } from '@proma/shared'
 import { inferContextWindow, MAX_ATTACHMENT_SIZE } from '@proma/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
@@ -182,16 +182,30 @@ function getUserTextFromSDKMessage(message: SDKMessage): string | null {
 // ===== 思考模式 Hover Popover =====
 
 interface AgentThinkingPopoverProps {
-  agentThinking: import('@proma/shared').ThinkingConfig | undefined
-  onToggle: () => void
+  thinkingLevel: AgentThinkingLevel
+  onThinkingLevelChange: (level: AgentThinkingLevel) => void
 }
 
-function AgentThinkingPopover({ agentThinking, onToggle }: AgentThinkingPopoverProps): React.ReactElement {
+const AGENT_THINKING_LEVEL_OPTIONS: Array<{ value: Exclude<AgentThinkingLevel, 'off'>; label: string }> = [
+  { value: 'minimal', label: '最小' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '极高' },
+]
+
+function AgentThinkingPopover({ thinkingLevel, onThinkingLevelChange }: AgentThinkingPopoverProps): React.ReactElement {
   const [thinkingExpanded, setThinkingExpanded] = useAtom(thinkingExpandedAtom)
   const [open, setOpen] = React.useState(false)
   const hoverTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const isEnabled = agentThinking?.type === 'adaptive'
+  const isEnabled = thinkingLevel !== 'off'
+  const selectedLevel = isEnabled ? thinkingLevel : 'high'
+
+  const handleToggle = React.useCallback((checked?: boolean) => {
+    const nextChecked = checked ?? !isEnabled
+    onThinkingLevelChange(nextChecked ? selectedLevel : 'off')
+  }, [isEnabled, onThinkingLevelChange, selectedLevel])
 
   const handleMouseEnter = React.useCallback(() => {
     if (hoverTimeout.current) clearTimeout(hoverTimeout.current)
@@ -219,7 +233,7 @@ function AgentThinkingPopover({ agentThinking, onToggle }: AgentThinkingPopoverP
             inputToolbarButtonClass,
             isEnabled && inputToolbarActiveButtonClass
           )}
-          onClick={onToggle}
+          onClick={() => handleToggle()}
           onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeave}
         >
@@ -230,19 +244,36 @@ function AgentThinkingPopover({ agentThinking, onToggle }: AgentThinkingPopoverP
         side="top"
         align="center"
         sideOffset={8}
-        className="w-auto min-w-[160px] p-2 px-2.5"
+        className="w-auto min-w-[220px] p-2 px-2.5"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-4">
             <span className="text-xs text-foreground/70">思考模式</span>
             <Switch
               checked={isEnabled}
-              onCheckedChange={onToggle}
+              onCheckedChange={handleToggle}
               className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3"
             />
+          </div>
+          <div className="grid grid-cols-5 gap-1">
+            {AGENT_THINKING_LEVEL_OPTIONS.map((option) => (
+              <Button
+                key={option.value}
+                type="button"
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  'h-7 px-2 text-xs',
+                  selectedLevel === option.value && isEnabled && inputToolbarActiveButtonClass
+                )}
+                onClick={() => onThinkingLevelChange(option.value)}
+              >
+                {option.label}
+              </Button>
+            ))}
           </div>
           <div className="h-px bg-border" />
           <div className="flex items-center justify-between gap-4">
@@ -357,7 +388,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const agentModelId = sessionModelMap.get(sessionId) ?? defaultModelId
   const agentChannelIds = useAtomValue(agentChannelIdsAtom)
   const setAgentChannelIds = useSetAtom(agentChannelIdsAtom)
-  const [agentThinking, setAgentThinking] = useAtom(agentThinkingAtom)
+  const [agentThinkingLevel, setAgentThinkingLevel] = useAtom(agentThinkingLevelAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const globalWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
@@ -2182,13 +2213,14 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       key: 'thinking',
       node: (
         <AgentThinkingPopover
-          agentThinking={agentThinking}
-          onToggle={() => {
-            const next = agentThinking?.type === 'adaptive'
-              ? { type: 'disabled' as const }
-              : { type: 'adaptive' as const }
-            setAgentThinking(next)
-            window.electronAPI.updateSettings({ agentThinking: next })
+          thinkingLevel={agentThinkingLevel}
+          onThinkingLevelChange={(next) => {
+            setAgentThinkingLevel(next)
+            window.electronAPI.updateSettings({
+              agentThinkingLevel: next,
+              agentThinking: undefined,
+              agentEffort: undefined,
+            })
           }}
         />
       ),
@@ -2268,8 +2300,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     agentModelId,
     handleModelSelect,
     sessionId,
-    agentThinking,
-    setAgentThinking,
+    agentThinkingLevel,
+    setAgentThinkingLevel,
     handleOpenFileDialog,
     handleAttachFolder,
     contextStatus.inputTokens,

@@ -5,7 +5,6 @@ import {
   applyPiProxySettingsForQuery,
   buildAllowedToolRoots,
   buildPiRemoteConnectionSettings,
-  thinkingLevelFromOptions,
 } from './pi-agent-adapter'
 
 const PROXY_ENV_KEYS = [
@@ -96,24 +95,6 @@ describe('Pi Agent adapter remote connection settings', () => {
     } finally {
       restoreProxyEnv(originalEnv)
     }
-  })
-})
-
-describe('Pi Agent adapter 思考等级映射', () => {
-  test('Given 未显式开启思考且默认 effort 为 high When 映射 Pi thinkingLevel Then 返回 off', () => {
-    expect(thinkingLevelFromOptions(undefined, 'high')).toBe('off')
-  })
-
-  test('Given 显式关闭思考 When 映射 Pi thinkingLevel Then 返回 off 而不是 minimal', () => {
-    expect(thinkingLevelFromOptions({ type: 'disabled' }, 'high')).toBe('off')
-  })
-
-  test('Given adaptive 思考开启 When 映射 Pi thinkingLevel Then 使用 effort 控制深度', () => {
-    expect(thinkingLevelFromOptions({ type: 'adaptive' }, 'low')).toBe('low')
-    expect(thinkingLevelFromOptions({ type: 'adaptive' }, 'medium')).toBe('medium')
-    expect(thinkingLevelFromOptions({ type: 'adaptive' }, 'high')).toBe('high')
-    expect(thinkingLevelFromOptions({ type: 'adaptive' }, 'max')).toBe('xhigh')
-    expect(thinkingLevelFromOptions({ type: 'adaptive' })).toBe('high')
   })
 })
 

@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type {
-  AgentEffort,
+  AgentThinkingLevel,
   AgentProviderAdapter,
   AgentQueryInput,
   ErrorCode,
@@ -21,7 +21,6 @@ import type {
   SendQueuedMessageOptions,
   SDKMessage,
   SDKUserMessageInput,
-  ThinkingConfig,
   TypedError,
 } from '@proma/shared'
 import {
@@ -96,8 +95,7 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   onSessionId?: (sdkSessionId: string) => void
   onModelResolved?: (model: string) => void
   onContextWindow?: (contextWindow: number) => void
-  thinking?: ThinkingConfig
-  effort?: AgentEffort
+  thinkingLevel?: AgentThinkingLevel
   maxBudgetUsd?: number
   outputFormat?: JsonSchemaOutputFormat
   additionalDirectories?: string[]
@@ -774,30 +772,6 @@ function buildPiRequestHeaders(provider: ProviderType, apiKey: string): PiReques
 
 function shouldUseRuntimeApiKey(provider: ProviderType): boolean {
   return !usesBearerOnlyAnthropicAuth(provider)
-}
-
-export function thinkingLevelFromOptions(thinking?: ThinkingConfig, effort?: AgentEffort): ThinkingLevel {
-  if (!thinking || thinking.type === 'disabled') return 'off'
-  // 固定思考预算（enabled）：pi 用离散思考等级而非 token 预算，按 budgetTokens 量级映射到最接近的等级，
-  // 避免用户设定的预算被静默丢弃、与「未设置」无差别
-  if (thinking.type === 'enabled') {
-    const budget = thinking.budgetTokens
-    if (budget <= 2048) return 'low'
-    if (budget <= 8192) return 'medium'
-    if (budget <= 16384) return 'high'
-    return 'xhigh'
-  }
-  switch (effort) {
-    case 'low':
-      return 'low'
-    case 'medium':
-      return 'medium'
-    case 'max':
-      return 'xhigh'
-    case 'high':
-    default:
-      return 'high'
-  }
 }
 
 function getPiEditItems(input: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -1902,7 +1876,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               hasToolResult,
               createSkillsOverride: createPromaSkillsOverride,
               preparePromptWithSkills: preparePromptWithPromaSkills,
-              thinkingLevel: thinkingLevelFromOptions(input.thinking, input.effort),
+              thinkingLevel: input.thinkingLevel ?? 'off',
               buildRemoteConnectionSettings: buildPiRemoteConnectionSettings,
               runtimeGuard,
               installRuntimeGuardHooks,
@@ -1943,7 +1917,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         resourceLoader,
         sessionManager,
         model,
-        thinkingLevel: thinkingLevelFromOptions(input.thinking, input.effort),
+        thinkingLevel: input.thinkingLevel ?? 'off',
         noTools: 'builtin',
         customTools,
       })

@@ -29,6 +29,8 @@ export interface AgentWorkspace {
  * - adaptive: 由模型自行决定何时以及思考多少
  * - enabled: 固定思考 Token 预算（旧模型）
  * - disabled: 不使用扩展思考
+ *
+ * @deprecated Agent 模式已改用 Pi 统一的 AgentThinkingLevel，仅保留用于旧设置迁移。
  */
 export type ThinkingConfig =
   | { type: 'adaptive' }
@@ -43,8 +45,13 @@ export type ThinkingConfig =
  * - medium: 适度思考
  * - high: 深度推理（默认）
  * - max: 最大深度（仅 Opus 4.6）
+ *
+ * @deprecated Agent 模式已改用 Pi 统一的 AgentThinkingLevel，仅保留用于旧设置迁移。
  */
 export type AgentEffort = 'low' | 'medium' | 'high' | 'max'
+
+/** Agent 思考等级（与 Pi SDK thinkingLevel 保持一致） */
+export type AgentThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 /**
  * 自定义子代理定义

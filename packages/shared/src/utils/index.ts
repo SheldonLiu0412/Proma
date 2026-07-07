@@ -34,3 +34,9 @@ export {
   isPersistableSDKSystemMessage,
   type SDKCompactStatus,
 } from './agent-system-message'
+export {
+  DEFAULT_AGENT_THINKING_LEVEL,
+  isAgentThinkingLevel,
+  migrateLegacyAgentThinkingLevel,
+  resolveAgentThinkingLevel,
+} from './agent-thinking-level'

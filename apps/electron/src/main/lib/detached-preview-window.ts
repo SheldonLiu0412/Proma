@@ -9,6 +9,7 @@ import { app, BrowserWindow, screen, shell } from 'electron'
 import type { Rectangle } from 'electron'
 import { basename, join } from 'path'
 import type { DetachedPreviewWindowData, DetachedPreviewWindowInput } from '@proma/shared'
+import { createPromaPreloadWebPreferences } from './window-web-preferences'
 
 const previewDataById = new Map<string, DetachedPreviewWindowData>()
 const previewWindowsById = new Map<string, BrowserWindow>()
@@ -98,11 +99,7 @@ export function openDetachedPreviewWindow(
     minHeight: 480,
     title: data.title,
     show: false,
-    webPreferences: {
-      preload: join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: createPromaPreloadWebPreferences(join(__dirname, 'preload.cjs')),
   })
 
   previewWindowsById.set(id, win)

@@ -8,6 +8,7 @@
 import { BrowserWindow, screen } from 'electron'
 import { join } from 'path'
 import { app } from 'electron'
+import { createPromaPreloadWebPreferences } from './window-web-preferences'
 
 /** 快速任务窗口单例 */
 let quickTaskWindow: BrowserWindow | null = null
@@ -38,11 +39,7 @@ export function createQuickTaskWindow(): void {
     fullscreenable: false,
     show: false,
     hasShadow: false,
-    webPreferences: {
-      preload: join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: createPromaPreloadWebPreferences(join(__dirname, 'preload.cjs')),
   })
 
   // 加载渲染进程（附带 query 参数区分窗口类型）

@@ -9,6 +9,38 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { getSettingsPath } from './config-paths'
 import { DEFAULT_INTERFACE_VARIANT, DEFAULT_THEME_MODE } from '../../types'
 import type { AppSettings } from '../../types'
+import { DEFAULT_AGENT_THINKING_LEVEL, resolveAgentThinkingLevel } from '@proma/shared'
+
+function withResolvedSettings(data: Partial<AppSettings>): AppSettings {
+  return {
+    ...data,
+    themeMode: data.themeMode || DEFAULT_THEME_MODE,
+    interfaceVariant: data.interfaceVariant || DEFAULT_INTERFACE_VARIANT,
+    onboardingCompleted: data.onboardingCompleted ?? false,
+    environmentCheckSkipped: data.environmentCheckSkipped ?? false,
+    notificationsEnabled: data.notificationsEnabled ?? true,
+    longTextPasteAsAttachmentEnabled: data.longTextPasteAsAttachmentEnabled ?? false,
+    richTextRenderingEnabled: data.richTextRenderingEnabled ?? false,
+    feishuSessionMirror: data.feishuSessionMirror ?? { mode: 'off' },
+    builtinMcpDisabledIds: data.builtinMcpDisabledIds ?? [],
+    agentThinkingLevel: resolveAgentThinkingLevel(data),
+  }
+}
+
+function getDefaultSettings(): AppSettings {
+  return {
+    themeMode: DEFAULT_THEME_MODE,
+    interfaceVariant: DEFAULT_INTERFACE_VARIANT,
+    onboardingCompleted: false,
+    environmentCheckSkipped: false,
+    notificationsEnabled: true,
+    longTextPasteAsAttachmentEnabled: false,
+    richTextRenderingEnabled: false,
+    feishuSessionMirror: { mode: 'off' },
+    builtinMcpDisabledIds: [],
+    agentThinkingLevel: DEFAULT_AGENT_THINKING_LEVEL,
+  }
+}
 
 /**
  * 获取应用设置
@@ -19,47 +51,16 @@ export function getSettings(): AppSettings {
   const filePath = getSettingsPath()
 
   if (!existsSync(filePath)) {
-    return {
-      themeMode: DEFAULT_THEME_MODE,
-      interfaceVariant: DEFAULT_INTERFACE_VARIANT,
-      onboardingCompleted: false,
-      environmentCheckSkipped: false,
-      notificationsEnabled: true,
-      longTextPasteAsAttachmentEnabled: false,
-      richTextRenderingEnabled: false,
-      feishuSessionMirror: { mode: 'off' },
-      builtinMcpDisabledIds: [],
-    }
+    return getDefaultSettings()
   }
 
   try {
     const raw = readFileSync(filePath, 'utf-8')
     const data = JSON.parse(raw) as Partial<AppSettings>
-    return {
-      ...data,
-      themeMode: data.themeMode || DEFAULT_THEME_MODE,
-      interfaceVariant: data.interfaceVariant || DEFAULT_INTERFACE_VARIANT,
-      onboardingCompleted: data.onboardingCompleted ?? false,
-      environmentCheckSkipped: data.environmentCheckSkipped ?? false,
-      notificationsEnabled: data.notificationsEnabled ?? true,
-      longTextPasteAsAttachmentEnabled: data.longTextPasteAsAttachmentEnabled ?? false,
-      richTextRenderingEnabled: data.richTextRenderingEnabled ?? false,
-      feishuSessionMirror: data.feishuSessionMirror ?? { mode: 'off' },
-      builtinMcpDisabledIds: data.builtinMcpDisabledIds ?? [],
-    }
+    return withResolvedSettings(data)
   } catch (error) {
     console.error('[设置] 读取失败:', error)
-    return {
-      themeMode: DEFAULT_THEME_MODE,
-      interfaceVariant: DEFAULT_INTERFACE_VARIANT,
-      onboardingCompleted: false,
-      environmentCheckSkipped: false,
-      notificationsEnabled: true,
-      longTextPasteAsAttachmentEnabled: false,
-      richTextRenderingEnabled: false,
-      feishuSessionMirror: { mode: 'off' },
-      builtinMcpDisabledIds: [],
-    }
+    return getDefaultSettings()
   }
 }
 

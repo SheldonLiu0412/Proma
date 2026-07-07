@@ -9,6 +9,7 @@ import { join } from 'path'
 import { VOICE_DICTATION_IPC_CHANNELS } from '../../types'
 import { getSettings, updateSettings } from './settings-service'
 import { captureVoiceDictationTarget } from './text-output-service'
+import { createPromaPreloadWebPreferences } from './window-web-preferences'
 
 let voiceDictationWindow: BrowserWindow | null = null
 let voiceDictationTargetCaptured = false
@@ -52,12 +53,9 @@ export function createVoiceDictationWindow(): void {
     acceptFirstMouse: true,
     show: false,
     hasShadow: true,
-    webPreferences: {
-      preload: join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
+    webPreferences: createPromaPreloadWebPreferences(join(__dirname, 'preload.cjs'), {
       partition: VOICE_DICTATION_PARTITION,
-    },
+    }),
   })
   voiceDictationWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   installVoiceDictationMediaPermissions(voiceDictationWindow)

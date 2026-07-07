@@ -33,8 +33,7 @@ import {
   currentAgentSessionIdAtom,
   workspaceCapabilitiesVersionAtom,
   workspaceFilesVersionAtom,
-  agentThinkingAtom,
-  agentEffortAtom,
+  agentThinkingLevelAtom,
   agentMaxBudgetUsdAtom,
   agentMaxTurnsAtom,
   agentSettingsReadyAtom,
@@ -161,8 +160,7 @@ function AgentSettingsInitializer(): null {
   const setCurrentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
   const bumpCapabilities = useSetAtom(workspaceCapabilitiesVersionAtom)
   const bumpFiles = useSetAtom(workspaceFilesVersionAtom)
-  const setThinking = useSetAtom(agentThinkingAtom)
-  const setEffort = useSetAtom(agentEffortAtom)
+  const setThinkingLevel = useSetAtom(agentThinkingLevelAtom)
   const setMaxBudget = useSetAtom(agentMaxBudgetUsdAtom)
   const setMaxTurns = useSetAtom(agentMaxTurnsAtom)
   const setAutomationGroupOrder = useSetAtom(automationGroupOrderAtom)
@@ -238,12 +236,7 @@ function AgentSettingsInitializer(): null {
         }
       }
 
-      if (settings.agentThinking) {
-        setThinking(settings.agentThinking)
-      }
-      if (settings.agentEffort) {
-        setEffort(settings.agentEffort)
-      }
+      setThinkingLevel(settings.agentThinkingLevel ?? 'off')
       if (settings.agentMaxBudgetUsd != null) {
         setMaxBudget(settings.agentMaxBudgetUsd)
       }
@@ -273,7 +266,7 @@ function AgentSettingsInitializer(): null {
       console.error(err)
       setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
     })
-  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setChannels, setChannelsLoaded, setAgentSettingsReady])
+  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentWorkspaces, setCurrentWorkspaceId, setThinkingLevel, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setChannels, setChannelsLoaded, setAgentSettingsReady])
 
   // 工作区切换时重置能力缓存，预加载基线
   useEffect(() => {

@@ -7,7 +7,7 @@
 
 import { atom } from 'jotai'
 import { atomFamily, atomWithStorage } from 'jotai/utils'
-import type { AgentSessionMeta, AgentEvent, AgentWorkspace, AgentPendingFile, RetryAttempt, PromaPermissionMode, PermissionRequest, AskUserRequest, ExitPlanModeRequest, ThinkingConfig, AgentEffort, SDKMessage, UnstagedChangesResult, TaskUsage } from '@proma/shared'
+import type { AgentEvent, AgentPendingFile, AgentSessionMeta, AgentThinkingLevel, AgentWorkspace, AskUserRequest, ExitPlanModeRequest, PermissionRequest, PromaPermissionMode, RetryAttempt, SDKMessage, TaskUsage, UnstagedChangesResult } from '@proma/shared'
 import { PROMA_DEFAULT_PERMISSION_MODE } from '@proma/shared'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
 import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
@@ -418,11 +418,8 @@ export const sessionExistsAtom = atomFamily((sessionId: string) =>
   }),
 )
 
-/** Agent 思考模式 */
-export const agentThinkingAtom = atom<ThinkingConfig | undefined>(undefined)
-
-/** Agent 推理深度 */
-export const agentEffortAtom = atom<AgentEffort | undefined>(undefined)
+/** Agent 思考等级（Pi SDK 统一抽象，off 表示关闭） */
+export const agentThinkingLevelAtom = atom<AgentThinkingLevel>('off')
 
 /** Agent 最大预算（美元/次） */
 export const agentMaxBudgetUsdAtom = atom<number | undefined>(undefined)

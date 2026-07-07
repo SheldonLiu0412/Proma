@@ -4,7 +4,7 @@
  * 主题模式、IPC 通道等设置相关定义。
  */
 
-import type { EnvironmentCheckResult, ThinkingConfig, AgentEffort, FeishuSessionMirrorSettings } from '@proma/shared'
+import type { AgentEffort, AgentThinkingLevel, EnvironmentCheckResult, FeishuSessionMirrorSettings, ThinkingConfig } from '@proma/shared'
 
 /** Pi SDK 远程模型请求传输策略 */
 export type AgentTransportMode = 'sse' | 'websocket' | 'websocket-cached' | 'auto'
@@ -221,9 +221,15 @@ export interface AppSettings {
   notificationSounds?: NotificationSoundSettings
   /** 标签页持久化状态（重启恢复） */
   tabState?: PersistedTabSettings
-  /** Agent 思考模式 */
+  /** Agent 思考等级（Pi SDK 统一抽象，off 表示关闭） */
+  agentThinkingLevel?: AgentThinkingLevel
+  /** Agent 思考模式
+   * @deprecated 使用 agentThinkingLevel
+   */
   agentThinking?: ThinkingConfig
-  /** Agent 推理深度 */
+  /** Agent 推理深度
+   * @deprecated 使用 agentThinkingLevel
+   */
   agentEffort?: AgentEffort
   /** Agent 最大预算（美元/次） */
   agentMaxBudgetUsd?: number

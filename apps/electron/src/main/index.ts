@@ -59,6 +59,7 @@ function registerProtocolsAndHandlers(): void {
 
 import { getSettings, updateSettings } from './lib/settings-service'
 import { handlePromaFileRequest } from './lib/local-file-protocol'
+import { createPromaPreloadWebPreferences } from './lib/window-web-preferences'
 
 // 处理 EPIPE 错误：当 stdout/stderr 管道被关闭时（如 electronmon 重启），忽略写入错误
 // 这在开发环境热重载时经常发生，不影响应用功能
@@ -352,11 +353,7 @@ function createWindow(): void {
     minHeight: 600,
     icon: iconExists ? iconPath : undefined,
     show: false,
-    webPreferences: {
-      preload: join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: createPromaPreloadWebPreferences(join(__dirname, 'preload.cjs')),
     ...titleBarOptions,
   })
   installWindowsZoomInFallback(mainWindow)
@@ -365,7 +362,9 @@ function createWindow(): void {
   const isDev = !app.isPackaged
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
-    mainWindow.webContents.openDevTools()
+    if (process.env.PROMA_OPEN_DEVTOOLS === '1') {
+      mainWindow.webContents.openDevTools()
+    }
   } else {
     mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'))
   }

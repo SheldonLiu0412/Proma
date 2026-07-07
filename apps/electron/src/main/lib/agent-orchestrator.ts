@@ -1479,9 +1479,8 @@ export class AgentOrchestrator {
         ...(runtimeReadOnlyAdditionalDirectories.length > 0 ? { readOnlyAdditionalDirectories: runtimeReadOnlyAdditionalDirectories } : {}),
         ...(workspaceSlug ? { additionalSkillPaths: [getWorkspaceSkillsDir(workspaceSlug)] } : {}),
         ...(mentionedSkillNames.length > 0 && { skillMentions: mentionedSkillNames }),
-        // Pi 思考配置（从 settings 读取）
-        ...(appSettings.agentThinking && { thinking: appSettings.agentThinking }),
-        effort: appSettings.agentEffort ?? 'high',
+        // Pi 思考等级（从 settings 读取，off 表示关闭）
+        thinkingLevel: appSettings.agentThinkingLevel ?? 'off',
         ...buildPiRemoteConnectionOptions(appSettings),
         // 子代理（Agent 工具）委派模型：DeepSeek 主模型下降级到 deepseek-v4-flash，缺省继承主模型
         ...(modelRouting.subagentModel && { subagentModel: modelRouting.subagentModel }),
