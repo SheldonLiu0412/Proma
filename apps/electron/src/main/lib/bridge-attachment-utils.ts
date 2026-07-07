@@ -206,7 +206,7 @@ function walkFileTree(
  * 递归构建任意目录的文件树文本行
  *
  * 用树形连接符（├─ └─ │）体现文件夹-文件层级。
- * 过滤所有点文件（.context、.claude、.git 等）及 node_modules。
+ * 过滤所有点文件（.context、.agents、.claude、.git 等）及 node_modules。
  * 每行以可见字符开头、用全角空格对齐，避免 markdown 折叠行首/连续空格。
  * 条目数触达上限时停止展开并在末尾追加单次提示。
  *

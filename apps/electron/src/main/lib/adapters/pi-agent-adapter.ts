@@ -62,6 +62,7 @@ import {
   type AgentRuntimeGuard,
   type RuntimeGuardResultOverride,
 } from '../agent-runtime-guards'
+import { createPromaAgentsFilesOverride } from './pi-resource-loader-overrides'
 import { createSubagentToolDefinition, isSubagentDelegationEnabled } from './pi-subagent-tool'
 import { mergeRuntimeEnv, type AgentRuntimeEnv } from '../agent-runtime-env'
 
@@ -1894,6 +1895,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         noSkills: true,
         additionalSkillPaths: input.additionalSkillPaths ?? [],
         skillsOverride: createPromaSkillsOverride(input.additionalSkillPaths),
+        agentsFilesOverride: createPromaAgentsFilesOverride(),
         systemPromptOverride: () => input.systemPrompt,
       })
       await resourceLoader.reload()

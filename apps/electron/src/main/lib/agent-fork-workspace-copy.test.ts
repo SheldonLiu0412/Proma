@@ -34,6 +34,7 @@ describe('fork 工作区复制', () => {
     const destDir = join(root, 'dest')
 
     writeFile(join(sourceDir, '.context', 'note.md'), 'keep')
+    writeFile(join(sourceDir, '.agents', 'memory', 'MEMORY.md'), 'skip')
     writeFile(join(sourceDir, '.claude', 'settings.json'), '{}')
     writeFile(join(sourceDir, 'node_modules', 'pkg', 'index.js'))
     writeFile(join(sourceDir, '.venv', 'pyvenv.cfg'))
@@ -45,11 +46,12 @@ describe('fork 工作区复制', () => {
     const result = copyForkWorkspaceFiles(sourceDir, destDir)
 
     expect(result.copiedCount).toBe(3)
-    expect(result.skippedCount).toBe(4)
+    expect(result.skippedCount).toBe(5)
     expect(result.failedCount).toBe(0)
     expect(existsSync(join(destDir, '.context', 'note.md'))).toBe(true)
     expect(existsSync(join(destDir, 'src', 'index.ts'))).toBe(true)
     expect(existsSync(join(destDir, 'nested-repo', 'src', 'file.ts'))).toBe(true)
+    expect(existsSync(join(destDir, '.agents', 'memory', 'MEMORY.md'))).toBe(false)
     expect(existsSync(join(destDir, '.claude', 'settings.json'))).toBe(false)
     expect(existsSync(join(destDir, 'node_modules'))).toBe(false)
     expect(existsSync(join(destDir, '.venv'))).toBe(false)
@@ -59,6 +61,7 @@ describe('fork 工作区复制', () => {
 
   test('Given 路径是会话上下文或依赖目录 When 判断是否复制 Then 只放行上下文', () => {
     expect(shouldCopyForkWorkspacePath('/tmp/session/.context')).toBe(true)
+    expect(shouldCopyForkWorkspacePath('/tmp/session/.agents')).toBe(false)
     expect(shouldCopyForkWorkspacePath('/tmp/session/.claude')).toBe(false)
     expect(shouldCopyForkWorkspacePath('/tmp/session/node_modules')).toBe(false)
     expect(shouldCopyForkWorkspacePath('/tmp/session/.git')).toBe(false)

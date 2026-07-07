@@ -14,7 +14,7 @@ import { useCreateSession } from '@/hooks/useCreateSession'
 import { cn } from '@/lib/utils'
 
 type SelectedMemoryFile =
-  | { kind: 'claude'; relativePath: 'CLAUDE.md'; title: string; absolutePath: string }
+  | { kind: 'agents'; relativePath: 'AGENTS.md'; title: string; absolutePath: string }
   | { kind: 'auto'; relativePath: string; title: string; absolutePath: string }
 
 interface WorkspaceMemoryTabProps {
@@ -49,9 +49,9 @@ function buildWorkspaceMemoryInitPrompt(historyRange: MemoryHistoryRange): strin
 1. 读取当前工作区${rangeLabel}的 Agent 工作会话，优先关注最新、最有代表性、用户实际完成工作的会话。如果证据不足，请说明而不是编造。
 2. 同时检查会话级 Context（各会话 cwd 下的 .context/）和工作区级 Context（工作区 workspace-files/.context/ 及相关本地文档），区分当前任务临时产物与跨会话长期资料。
 3. 从这些会话和 Context 中提炼工作区级别的稳定知识，包括项目结构、常用命令、架构约定、用户偏好、踩坑经验、重要决策和未来 Agent 必须知道的注意事项。
-4. 更新工作区根目录的 CLAUDE.md：只写稳定、跨会话有价值的项目指令和工作方式，避免写临时过程和聊天流水账。
-5. 更新工作区 .claude/memory/MEMORY.md，必要时创建主题文件：MEMORY.md 只放主题索引和路由，详细内容拆到主题文件；只记录 auto memory 应该长期回忆的经验。
-6. 沉淀并持续迭代一份「用户画像」记忆，写入 .claude/memory/user-profile.md（并在 MEMORY.md 索引中登记）。这份画像用于让未来的 Agent 越来越懂用户，应包含：
+4. 更新工作区根目录的 AGENTS.md：只写稳定、跨会话有价值的项目指令和工作方式，避免写临时过程和聊天流水账。
+5. 更新工作区 .agents/memory/MEMORY.md，必要时创建主题文件：MEMORY.md 只放主题索引和路由，详细内容拆到主题文件；只记录 auto memory 应该长期回忆的经验。
+6. 沉淀并持续迭代一份「用户画像」记忆，写入 .agents/memory/user-profile.md（并在 MEMORY.md 索引中登记）。这份画像用于让未来的 Agent 越来越懂用户，应包含：
    - 用户的角色、技术背景与擅长领域
    - 稳定的工作方式与协作偏好（沟通风格、语言、颗粒度、对确认/自动化的偏好等）
    - 反复出现的关注点、常用工具链和技术栈倾向
@@ -175,14 +175,14 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
 
   /** 底层写入：把指定内容写回目标文件并刷新摘要，供手动保存与自动保存复用 */
   const persistTarget = React.useCallback(async (target: SelectedMemoryFile, text: string): Promise<void> => {
-    if (target.kind === 'claude') {
-      await window.electronAPI.writeWorkspaceClaudeMd(workspaceSlug, text)
+    if (target.kind === 'agents') {
+      await window.electronAPI.writeWorkspaceAgentsMd(workspaceSlug, text)
     } else {
       await window.electronAPI.writeWorkspaceAutoMemoryFile(workspaceSlug, target.relativePath, text)
     }
     const nextSummary = await refreshSummaryAndTree()
-    const nextAbsolute = target.kind === 'claude'
-      ? nextSummary.claudeMd.path
+    const nextAbsolute = target.kind === 'agents'
+      ? nextSummary.agentsMd.path
       : autoMemoryPath(nextSummary, target.relativePath)
     // 仅当用户仍停留在同一文件时才回写 absolutePath，避免覆盖已切换到别处的 selected
     setSelected((prev) => (prev && prev.kind === target.kind && prev.relativePath === target.relativePath
@@ -231,23 +231,23 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
     }
   }, [persistTarget])
 
-  const openClaude = React.useCallback(async (knownSummary?: WorkspaceMemorySummary): Promise<void> => {
+  const openAgents = React.useCallback(async (knownSummary?: WorkspaceMemorySummary): Promise<void> => {
     await flushPendingSave()
     setLoadingFile(true)
     try {
       const currentSummary = knownSummary ?? summary ?? await window.electronAPI.getWorkspaceMemorySummary(workspaceSlug)
-      const file = await window.electronAPI.readWorkspaceClaudeMd(workspaceSlug)
+      const file = await window.electronAPI.readWorkspaceAgentsMd(workspaceSlug)
       setSelected({
-        kind: 'claude',
-        relativePath: 'CLAUDE.md',
-        title: 'CLAUDE.md',
-        absolutePath: currentSummary.claudeMd.path,
+        kind: 'agents',
+        relativePath: 'AGENTS.md',
+        title: 'AGENTS.md',
+        absolutePath: currentSummary.agentsMd.path,
       })
       setEditText(file.content ?? '')
       setIsDirty(false)
     } catch (err) {
-      console.error('[工作区记忆] 读取 CLAUDE.md 失败:', err)
-      toast.error(err instanceof Error ? err.message : '读取 CLAUDE.md 失败')
+      console.error('[工作区记忆] 读取 AGENTS.md 失败:', err)
+      toast.error(err instanceof Error ? err.message : '读取 AGENTS.md 失败')
     } finally {
       setLoadingFile(false)
     }
@@ -283,7 +283,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
       if (selected?.kind === 'auto') {
         await openAutoFile(selected.relativePath, nextSummary)
       } else {
-        await openClaude(nextSummary)
+        await openAgents(nextSummary)
       }
     } catch (err) {
       console.error('[工作区记忆] 刷新失败:', err)
@@ -291,7 +291,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
     } finally {
       setLoading(false)
     }
-  }, [openAutoFile, openClaude, refreshSummaryAndTree, selected, flushPendingSave])
+  }, [openAutoFile, openAgents, refreshSummaryAndTree, selected, flushPendingSave])
 
   React.useEffect(() => {
     let cancelled = false
@@ -302,21 +302,21 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
     setLoading(true)
     void (async () => {
       try {
-        const [nextSummary, files, claudeFile] = await Promise.all([
+        const [nextSummary, files, agentsFile] = await Promise.all([
           window.electronAPI.getWorkspaceMemorySummary(workspaceSlug),
           window.electronAPI.listWorkspaceAutoMemoryFiles(workspaceSlug),
-          window.electronAPI.readWorkspaceClaudeMd(workspaceSlug),
+          window.electronAPI.readWorkspaceAgentsMd(workspaceSlug),
         ])
         if (cancelled) return
         setSummary(nextSummary)
         setAutoFiles(files)
         setSelected({
-          kind: 'claude',
-          relativePath: 'CLAUDE.md',
-          title: 'CLAUDE.md',
-          absolutePath: nextSummary.claudeMd.path,
+          kind: 'agents',
+          relativePath: 'AGENTS.md',
+          title: 'AGENTS.md',
+          absolutePath: nextSummary.agentsMd.path,
         })
-        setEditText(claudeFile.content ?? '')
+        setEditText(agentsFile.content ?? '')
         setIsDirty(false)
       } catch (err) {
         console.error('[工作区记忆] 加载失败:', err)
@@ -407,16 +407,16 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
         <MemoryStatCard
           icon={<BookOpen size={18} />}
           title="项目指令"
-          subtitle="工作区根目录 CLAUDE.md"
-          value={summary.claudeMd.exists ? formatBytes(summary.claudeMd.size) : '尚未创建'}
-          detail={`更新于 ${formatTime(summary.claudeMd.updatedAt)}`}
-          active={selected?.kind === 'claude'}
-          onClick={() => void openClaude(summary)}
+          subtitle="工作区根目录 AGENTS.md"
+          value={summary.agentsMd.exists ? formatBytes(summary.agentsMd.size) : '尚未创建'}
+          detail={`更新于 ${formatTime(summary.agentsMd.updatedAt)}`}
+          active={selected?.kind === 'agents'}
+          onClick={() => void openAgents(summary)}
         />
         <MemoryStatCard
           icon={<Brain size={18} />}
           title="自动记忆"
-          subtitle=".claude/memory/MEMORY.md 与主题文件"
+          subtitle=".agents/memory/MEMORY.md 与主题文件"
           value={`${summary.autoMemory.fileCount} 个文件`}
           detail={`${formatBytes(summary.autoMemory.totalSize)} · 更新于 ${formatTime(summary.autoMemory.updatedAt)}`}
           active={selected?.kind === 'auto'}
@@ -429,7 +429,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
           <div className="min-w-0">
             <div className="text-sm font-medium text-foreground">从历史会话生成工作区记忆</div>
             <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              新建一个 Agent 会话，读取当前工作区{historyRangeLabel}的工作会话，沉淀并更新 CLAUDE.md 与 auto memory 文件。
+              新建一个 Agent 会话，读取当前工作区{historyRangeLabel}的工作会话，沉淀并更新 AGENTS.md 与 auto memory 文件。
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -473,11 +473,11 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               <FileButton
-                active={selected?.kind === 'claude'}
+                active={selected?.kind === 'agents'}
                 icon={<FileText size={14} />}
-                label="CLAUDE.md"
+                label="AGENTS.md"
                 meta="工作区项目指令"
-                onClick={() => void openClaude(summary)}
+                onClick={() => void openAgents(summary)}
               />
               <div className="mt-3 px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
                 Auto Memory
@@ -589,7 +589,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
                 }}
                 spellCheck={false}
                 className="min-h-0 flex-1 resize-none bg-transparent p-4 font-mono text-[13px] leading-6 text-foreground outline-none placeholder:text-muted-foreground"
-                placeholder={selected.kind === 'claude'
+                placeholder={selected.kind === 'agents'
                   ? '# 项目指令\n\n写下未来 Agent 必须知道的项目规范、命令和决策。'
                   : '# MEMORY\n\n写下稳定、可复用的自动记忆索引。'}
               />

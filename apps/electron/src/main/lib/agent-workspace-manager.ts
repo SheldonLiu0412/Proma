@@ -31,7 +31,7 @@ interface AgentWorkspacesIndex {
   workspaces: AgentWorkspace[]
 }
 
-const INDEX_VERSION = 2
+const INDEX_VERSION = 3
 
 /** 读取工作区索引文件，自动执行版本迁移 */
 function readIndex(): AgentWorkspacesIndex {
@@ -55,6 +55,11 @@ function migrateIndex(index: AgentWorkspacesIndex): void {
   // v1 → v2: 为所有工作区默认启用 skill-creator
   if (oldVersion < 2) {
     activateSkillCreatorInAllWorkspaces(index)
+  }
+
+  // v2 → v3: 将旧 Claude Code 风格的项目指令和 auto memory 一次性迁移到 Proma/Pi SDK 统一路径。
+  if (oldVersion < 3) {
+    migrateMemoryToAgentsInAllWorkspaces(index.workspaces)
   }
 
   index.version = INDEX_VERSION
@@ -887,11 +892,175 @@ const SKILL_FILE_SIZE_LIMIT = 10 * 1024 * 1024
 /** 文件树递归深度上限，防止异常深嵌套 */
 const SKILL_TREE_MAX_DEPTH = 8
 
-const WORKSPACE_CLAUDE_MD = 'CLAUDE.md'
-const AUTO_MEMORY_DIR = '.claude/memory'
+const WORKSPACE_AGENTS_MD = 'AGENTS.md'
+const LEGACY_WORKSPACE_CLAUDE_MD = 'CLAUDE.md'
+const AUTO_MEMORY_DIR = '.agents/memory'
+const LEGACY_AUTO_MEMORY_DIR = '.claude/memory'
 const AUTO_MEMORY_INDEX = 'MEMORY.md'
+const LEGACY_AUTO_MEMORY_CONFLICT_DIR = '_legacy-claude'
+const MIGRATED_CLAUDE_BLOCK_START = '<!-- proma:migrated-from-claude-md:start -->'
+const MIGRATED_CLAUDE_BLOCK_END = '<!-- proma:migrated-from-claude-md:end -->'
 
-function fileSummary(absPath: string): WorkspaceMemorySummary['claudeMd'] {
+export interface MemoryMigrationStats {
+  agentsMdMigrated: boolean
+  autoMemoryCopied: number
+  autoMemoryConflicts: number
+}
+
+function ensureTrailingNewline(content: string): string {
+  return content.endsWith('\n') ? content : `${content}\n`
+}
+
+function buildMigratedClaudeBlock(content: string, contentAlreadyPresent: boolean): string {
+  const body = contentAlreadyPresent
+    ? '旧 CLAUDE.md 内容已存在于 AGENTS.md，Proma 仅记录本次路径迁移。'
+    : content.trimEnd()
+
+  return [
+    MIGRATED_CLAUDE_BLOCK_START,
+    '## 迁移自 CLAUDE.md',
+    '',
+    '以下内容由 Proma 从旧版 CLAUDE.md 一次性迁移。迁移完成后，请继续维护 AGENTS.md；旧 CLAUDE.md 不再作为 Proma 的项目指令来源。',
+    '',
+    body,
+    MIGRATED_CLAUDE_BLOCK_END,
+    '',
+  ].join('\n')
+}
+
+function fileContentsEqual(leftPath: string, rightPath: string): boolean {
+  try {
+    const left = readFileSync(leftPath)
+    const right = readFileSync(rightPath)
+    return left.length === right.length && left.equals(right)
+  } catch {
+    return false
+  }
+}
+
+function appendMigratedClaudeBlock(agentsPath: string, claudePath: string): boolean {
+  if (!existsSync(claudePath)) return false
+  const st = statSync(claudePath)
+  if (!st.isFile() || isLikelyBinaryFile(claudePath, st.size)) return false
+
+  const legacyContent = readFileSync(claudePath, 'utf-8').trimEnd()
+  if (legacyContent.length === 0) return false
+
+  const currentContent = existsSync(agentsPath) ? readFileSync(agentsPath, 'utf-8') : ''
+  if (currentContent.includes(MIGRATED_CLAUDE_BLOCK_START)) return false
+
+  const migratedBlock = buildMigratedClaudeBlock(legacyContent, currentContent.includes(legacyContent))
+  const nextContent = currentContent.trim().length > 0
+    ? `${ensureTrailingNewline(currentContent.trimEnd())}\n${migratedBlock}`
+    : migratedBlock
+  writeFileSync(agentsPath, nextContent, 'utf-8')
+  return true
+}
+
+function resolveLegacyAutoMemoryConflictPath(targetDir: string, relativePath: string): string {
+  const preferred = join(targetDir, LEGACY_AUTO_MEMORY_CONFLICT_DIR, relativePath)
+  if (!existsSync(preferred)) return preferred
+
+  const parsedName = basename(relativePath)
+  const parent = dirname(relativePath)
+  const dotIndex = parsedName.lastIndexOf('.')
+  const stem = dotIndex > 0 ? parsedName.slice(0, dotIndex) : parsedName
+  const ext = dotIndex > 0 ? parsedName.slice(dotIndex) : ''
+  for (let index = 2; index < 1000; index += 1) {
+    const candidateName = `${stem}-${index}${ext}`
+    const candidate = join(targetDir, LEGACY_AUTO_MEMORY_CONFLICT_DIR, parent === '.' ? candidateName : join(parent, candidateName))
+    if (!existsSync(candidate)) return candidate
+  }
+  return join(targetDir, LEGACY_AUTO_MEMORY_CONFLICT_DIR, parent === '.' ? `${stem}-${Date.now()}${ext}` : join(parent, `${stem}-${Date.now()}${ext}`))
+}
+
+function copyLegacyAutoMemoryFile(sourcePath: string, targetDir: string, relativePath: string, stats: MemoryMigrationStats): void {
+  const primaryTarget = join(targetDir, relativePath)
+  let finalTarget = primaryTarget
+  if (existsSync(primaryTarget)) {
+    if (fileContentsEqual(sourcePath, primaryTarget)) return
+    const conflictTarget = join(targetDir, LEGACY_AUTO_MEMORY_CONFLICT_DIR, relativePath)
+    if (existsSync(conflictTarget) && fileContentsEqual(sourcePath, conflictTarget)) return
+    finalTarget = resolveLegacyAutoMemoryConflictPath(targetDir, relativePath)
+    stats.autoMemoryConflicts += 1
+  }
+
+  mkdirSync(dirname(finalTarget), { recursive: true })
+  cpSync(sourcePath, finalTarget)
+  stats.autoMemoryCopied += 1
+}
+
+function copyLegacyAutoMemoryDir(legacyDir: string, targetDir: string, stats: MemoryMigrationStats): void {
+  if (!existsSync(legacyDir)) return
+  const st = statSync(legacyDir)
+  if (!st.isDirectory()) return
+
+  mkdirSync(targetDir, { recursive: true })
+  const walk = (currentDir: string): void => {
+    let entries: import('node:fs').Dirent[]
+    try {
+      entries = readdirSync(currentDir, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const sourcePath = join(currentDir, entry.name)
+      const relativePath = relative(legacyDir, sourcePath).split(/[\\/]/).join('/')
+      if (entry.isDirectory()) {
+        walk(sourcePath)
+      } else if (entry.isFile()) {
+        copyLegacyAutoMemoryFile(sourcePath, targetDir, relativePath, stats)
+      }
+    }
+  }
+
+  walk(legacyDir)
+}
+
+export function migrateWorkspaceMemoryRootToAgents(workspaceRoot: string): MemoryMigrationStats {
+  const stats: MemoryMigrationStats = {
+    agentsMdMigrated: false,
+    autoMemoryCopied: 0,
+    autoMemoryConflicts: 0,
+  }
+
+  stats.agentsMdMigrated = appendMigratedClaudeBlock(
+    join(workspaceRoot, WORKSPACE_AGENTS_MD),
+    join(workspaceRoot, LEGACY_WORKSPACE_CLAUDE_MD),
+  )
+  copyLegacyAutoMemoryDir(join(workspaceRoot, LEGACY_AUTO_MEMORY_DIR), join(workspaceRoot, AUTO_MEMORY_DIR), stats)
+
+  return stats
+}
+
+function migrateWorkspaceMemoryToAgents(workspaceSlug: string): MemoryMigrationStats {
+  const workspaceRoot = getAgentWorkspacePath(workspaceSlug)
+
+  try {
+    return migrateWorkspaceMemoryRootToAgents(workspaceRoot)
+  } catch (err) {
+    console.warn(`[Agent 工作区] 旧记忆迁移失败，已保留原文件 (${workspaceSlug}):`, err)
+  }
+
+  return { agentsMdMigrated: false, autoMemoryCopied: 0, autoMemoryConflicts: 0 }
+}
+
+function migrateMemoryToAgentsInAllWorkspaces(workspaces: AgentWorkspace[]): void {
+  let migratedAgentsMd = 0
+  let copiedAutoMemory = 0
+  let conflictAutoMemory = 0
+  for (const workspace of workspaces) {
+    const stats = migrateWorkspaceMemoryToAgents(workspace.slug)
+    if (stats.agentsMdMigrated) migratedAgentsMd += 1
+    copiedAutoMemory += stats.autoMemoryCopied
+    conflictAutoMemory += stats.autoMemoryConflicts
+  }
+  console.log(`[Agent 工作区] 旧记忆迁移完成: AGENTS.md ${migratedAgentsMd} 个，auto memory ${copiedAutoMemory} 个文件，冲突归档 ${conflictAutoMemory} 个`)
+}
+
+function fileSummary(absPath: string): WorkspaceMemorySummary['agentsMd'] {
   if (!existsSync(absPath)) {
     return { exists: false, path: absPath, size: 0 }
   }
@@ -904,8 +1073,8 @@ function fileSummary(absPath: string): WorkspaceMemorySummary['claudeMd'] {
   }
 }
 
-export function getWorkspaceClaudeMdPath(workspaceSlug: string): string {
-  return join(getAgentWorkspacePath(workspaceSlug), WORKSPACE_CLAUDE_MD)
+export function getWorkspaceAgentsMdPath(workspaceSlug: string): string {
+  return join(getAgentWorkspacePath(workspaceSlug), WORKSPACE_AGENTS_MD)
 }
 
 function getWorkspaceAutoMemoryPath(workspaceSlug: string): string {
@@ -1041,37 +1210,37 @@ function buildMemoryFileTree(rootDir: string, currentDir: string, depth: number)
 export function getWorkspaceMemorySummary(workspaceSlug: string): WorkspaceMemorySummary {
   const memoryDir = getWorkspaceAutoMemoryPath(workspaceSlug)
   return {
-    claudeMd: fileSummary(getWorkspaceClaudeMdPath(workspaceSlug)),
+    agentsMd: fileSummary(getWorkspaceAgentsMdPath(workspaceSlug)),
     autoMemory: collectAutoMemorySummary(memoryDir),
   }
 }
 
-export function readWorkspaceClaudeMd(workspaceSlug: string): SkillFileContent {
-  const abs = getWorkspaceClaudeMdPath(workspaceSlug)
+export function readWorkspaceAgentsMd(workspaceSlug: string): SkillFileContent {
+  const abs = getWorkspaceAgentsMdPath(workspaceSlug)
   if (!existsSync(abs)) {
-    return { relativePath: WORKSPACE_CLAUDE_MD, isText: true, size: 0, content: '' }
+    return { relativePath: WORKSPACE_AGENTS_MD, isText: true, size: 0, content: '' }
   }
   const st = statSync(abs)
-  if (!st.isFile()) throw new Error(`${WORKSPACE_CLAUDE_MD} 不是文件`)
+  if (!st.isFile()) throw new Error(`${WORKSPACE_AGENTS_MD} 不是文件`)
   if (st.size > SKILL_FILE_SIZE_LIMIT) {
     throw new Error(`文件过大（${(st.size / 1024 / 1024).toFixed(2)} MB），超过 10 MB 限制`)
   }
   const binary = isLikelyBinaryFile(abs, st.size)
   return {
-    relativePath: WORKSPACE_CLAUDE_MD,
+    relativePath: WORKSPACE_AGENTS_MD,
     isText: !binary,
     size: st.size,
     content: binary ? undefined : readFileSync(abs, 'utf-8'),
   }
 }
 
-export function writeWorkspaceClaudeMd(workspaceSlug: string, content: string): void {
+export function writeWorkspaceAgentsMd(workspaceSlug: string, content: string): void {
   const byteLen = Buffer.byteLength(content, 'utf-8')
   if (byteLen > SKILL_FILE_SIZE_LIMIT) {
     throw new Error(`内容过大（${(byteLen / 1024 / 1024).toFixed(2)} MB），超过 10 MB 限制`)
   }
-  writeFileSync(getWorkspaceClaudeMdPath(workspaceSlug), content, 'utf-8')
-  console.log(`[Agent 工作区] 已更新工作区 CLAUDE.md: ${workspaceSlug}`)
+  writeFileSync(getWorkspaceAgentsMdPath(workspaceSlug), content, 'utf-8')
+  console.log(`[Agent 工作区] 已更新工作区 AGENTS.md: ${workspaceSlug}`)
 }
 
 export function listWorkspaceAutoMemoryFiles(workspaceSlug: string): SkillFileNode[] {
@@ -1121,7 +1290,7 @@ export function writeWorkspaceAutoMemoryFile(workspaceSlug: string, relativePath
 const AUTO_MEMORY_CONTEXT_MAX_BYTES = 64 * 1024
 
 /**
- * 读取工作区 auto memory 目录（`.claude/memory/`）的全部文本内容，拼成可注入上下文的字符串。
+ * 读取工作区 auto memory 目录（`.agents/memory/`）的全部文本内容，拼成可注入上下文的字符串。
  *
  * MEMORY.md 索引置顶，其余主题文件按路径排序追加，每个文件前加 `### 相对路径` 标题。
  * 超过 AUTO_MEMORY_CONTEXT_MAX_BYTES 预算后停止追加并给出提示，剩余文件靠 Read 按需读取。
