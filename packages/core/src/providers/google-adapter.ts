@@ -70,6 +70,65 @@ interface GoogleTitleResponse {
   }>
 }
 
+interface GoogleThinkingConfig {
+  includeThoughts?: boolean
+  thinkingBudget?: number
+  thinkingLevel?: 'minimal' | 'low'
+}
+
+function normalizeGoogleModelId(modelId: string): string {
+  return modelId.toLowerCase().replace(/^models\//, '')
+}
+
+function supportsThinkingBudgetOff(modelId: string): boolean {
+  const normalized = normalizeGoogleModelId(modelId)
+  return normalized.startsWith('gemini-2.5-flash') || normalized.startsWith('robotics-er-1.6')
+}
+
+function supportsMinimumThinkingBudget(modelId: string): boolean {
+  return normalizeGoogleModelId(modelId).startsWith('gemini-2.5-pro')
+}
+
+function supportsMinimalThinkingLevel(modelId: string): boolean {
+  const normalized = normalizeGoogleModelId(modelId)
+  return normalized.startsWith('gemini-3.5-flash')
+    || normalized.startsWith('gemini-3-flash')
+    || normalized.startsWith('gemini-3.1-flash-lite')
+}
+
+function supportsLowThinkingLevel(modelId: string): boolean {
+  const normalized = normalizeGoogleModelId(modelId)
+  return normalized.startsWith('gemini-3.1-pro')
+    || normalized.startsWith('gemini-3-pro')
+}
+
+function buildGoogleThinkingConfig(modelId: string, thinkingEnabled?: boolean): GoogleThinkingConfig | undefined {
+  if (thinkingEnabled) {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 16384,
+    }
+  }
+
+  if (supportsThinkingBudgetOff(modelId)) {
+    return { thinkingBudget: 0 }
+  }
+
+  if (supportsMinimumThinkingBudget(modelId)) {
+    return { thinkingBudget: 128 }
+  }
+
+  if (supportsMinimalThinkingLevel(modelId)) {
+    return { thinkingLevel: 'minimal' }
+  }
+
+  if (supportsLowThinkingLevel(modelId)) {
+    return { thinkingLevel: 'low' }
+  }
+
+  return undefined
+}
+
 // ===== 消息转换 =====
 
 /**
@@ -204,12 +263,10 @@ export class GoogleAdapter implements ProviderAdapter {
 
     // 思考模式配置：
     // - 启用时：显示思考过程 + 设置 thinkingBudget 控制深度
-    // - 关闭时：不传 thinkingConfig，模型使用默认行为
-    if (input.thinkingEnabled) {
-      generationConfig.thinkingConfig = {
-        includeThoughts: true,
-        thinkingBudget: 16384,
-      }
+    // - 关闭时：显式使用供应商支持的最低档；Gemini 2.5 Flash 需要 thinkingBudget=0 才会关闭默认思考
+    const thinkingConfig = buildGoogleThinkingConfig(input.modelId, input.thinkingEnabled)
+    if (thinkingConfig) {
+      generationConfig.thinkingConfig = thinkingConfig
     }
 
     const body: Record<string, unknown> = {
@@ -296,6 +353,12 @@ export class GoogleAdapter implements ProviderAdapter {
   buildTitleRequest(input: TitleRequestInput): ProviderRequest {
     const url = normalizeBaseUrl(input.baseUrl)
 
+    const thinkingConfig = buildGoogleThinkingConfig(input.modelId, false)
+    const generationConfig: Record<string, unknown> = { maxOutputTokens: 50 }
+    if (thinkingConfig) {
+      generationConfig.thinkingConfig = thinkingConfig
+    }
+
     return {
       url: `${url}/v1beta/models/${input.modelId}:generateContent?key=${input.apiKey}`,
       headers: {
@@ -303,7 +366,7 @@ export class GoogleAdapter implements ProviderAdapter {
       },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: input.prompt }] }],
-        generationConfig: { maxOutputTokens: 50 },
+        generationConfig,
       }),
     }
   }
