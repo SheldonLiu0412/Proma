@@ -373,7 +373,8 @@ export function SearchDialog(): React.ReactElement {
 2. 找到相关会话后，给出会话标题、相关内容摘要，以及文件路径
 3. 按相关性排序，最相关的结果排在最前面`
 
-    const sessionId = await createAgent({ channelId })
+    const modelId = deepseekChannel ? 'deepseek-v4-flash' : undefined
+    const sessionId = await createAgent({ channelId, modelId })
     if (!sessionId) return
 
     setAgentPendingPrompt({ sessionId, message: prompt })

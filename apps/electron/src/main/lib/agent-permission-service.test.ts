@@ -22,6 +22,24 @@ describe('AgentPermissionService auto 权限模式', () => {
     expect(requests).toEqual([])
   })
 
+  test('Given Proma 内置可见进度工具 When auto 模式检查权限 Then 自动允许且不弹审批', async () => {
+    const service = new AgentPermissionService()
+    const requests: PermissionRequest[] = []
+    const canUseTool = service.createCanUseTool('session-auto', (request) => requests.push(request))
+
+    await expect(canUseTool('TaskCreate', { tasks: [{ title: '读取上下文', status: 'pending' }] }, options()))
+      .resolves.toEqual({
+        behavior: 'allow',
+        updatedInput: { tasks: [{ title: '读取上下文', status: 'pending' }] },
+      })
+    await expect(canUseTool('TaskUpdate', { id: 'task-1', status: 'completed' }, options()))
+      .resolves.toEqual({
+        behavior: 'allow',
+        updatedInput: { id: 'task-1', status: 'completed' },
+      })
+    expect(requests).toEqual([])
+  })
+
   test('Given 写工具 When 用户批准并选择始终允许 Then 同会话同工具后续自动允许', async () => {
     const service = new AgentPermissionService()
     const requests: PermissionRequest[] = []

@@ -372,6 +372,55 @@ describe('MCP Pi bridge 初始化', () => {
     expect(fakeHttpTransports[0]?.closeCalls).toBe(1)
   })
 
+  test('Given HTTP MCP 配置包含 bearer auth When 构建桥接 Then 映射为 Authorization 请求头', async () => {
+    queuedListToolsBehaviors.push({ kind: 'success', tools: [] })
+
+    const result = await bridge.buildMcpBridgeTools({
+      remote: {
+        type: 'http',
+        url: 'https://example.com/mcp',
+        auth: { type: 'bearer', token: 'secret-token' },
+      },
+    })
+
+    expect(fakeHttpTransports[0]?.options?.requestInit?.headers).toEqual({ Authorization: 'Bearer secret-token' })
+
+    await result.cleanup()
+  })
+
+  test('Given SSE MCP 配置包含 basic auth When 构建桥接 Then 映射为 Basic Authorization 并注入 SSE fetch', async () => {
+    queuedListToolsBehaviors.push({ kind: 'success', tools: [] })
+
+    const result = await bridge.buildMcpBridgeTools({
+      events: {
+        type: 'sse',
+        url: 'https://example.com/sse',
+        auth: { type: 'basic', username: 'alice', password: 'secret' },
+      },
+    })
+
+    const expectedAuthorization = `Basic ${Buffer.from('alice:secret', 'utf-8').toString('base64')}`
+    expect(fakeSseTransports[0]?.options?.requestInit?.headers).toEqual({ Authorization: expectedAuthorization })
+    expect(fakeSseTransports[0]?.options?.eventSourceInit?.fetch).toBeDefined()
+
+    await result.cleanup()
+  })
+
+  test('Given required HTTP MCP 配置包含 authProvider When 构建桥接 Then 明确失败且不创建 transport', async () => {
+    const buildPromise = bridge.buildMcpBridgeTools({
+      privateRemote: {
+        type: 'http',
+        url: 'https://example.com/mcp',
+        auth: { type: 'oauth', authProvider: { name: 'custom-oauth' } },
+        required: true,
+      },
+    })
+
+    await expect(buildPromise).rejects.toThrow('authProvider')
+    expect(fakeClients).toHaveLength(0)
+    expect(fakeHttpTransports).toHaveLength(0)
+  })
+
   test('Given SSE MCP 配置包含 headers When 构建桥接 Then POST 和 SSE fetch 都可注入请求头', async () => {
     queuedListToolsBehaviors.push({ kind: 'success', tools: [] })
 
@@ -407,6 +456,21 @@ describe('MCP Pi bridge 初始化', () => {
 
     await result.cleanup()
     expect(fakeWebSocketTransports[0]?.closeCalls).toBe(1)
+  })
+
+  test('Given WebSocket MCP 配置包含 headers When 构建桥接 Then 明确失败避免认证静默无效', async () => {
+    const buildPromise = bridge.buildMcpBridgeTools({
+      realtime: {
+        type: 'websocket',
+        url: 'wss://example.com/mcp',
+        headers: { Authorization: 'Bearer ws-token' },
+        required: true,
+      },
+    })
+
+    await expect(buildPromise).rejects.toThrow('WebSocket transport 不支持注入 headers/auth')
+    expect(fakeClients).toHaveLength(0)
+    expect(fakeWebSocketTransports).toHaveLength(0)
   })
 
   test('Given GetMcpPromptTool When 读取带 role 的 PromptMessage Then 展开嵌套 content 并加 role 前缀', async () => {

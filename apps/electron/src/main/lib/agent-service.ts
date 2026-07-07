@@ -222,7 +222,11 @@ export async function runAgentHeadless(
 ): Promise<void> {
   // 尝试注册主窗口 webContents，让流式事件同步推送到桌面端
   const wc = getMainRendererWebContents()
-  const runInput: AgentSendInput = input.startedAt != null ? input : { ...input, startedAt: Date.now() }
+  const runInput: AgentSendInput = {
+    ...input,
+    startedAt: input.startedAt ?? Date.now(),
+    interactive: false,
+  }
   const startedAt = runInput.startedAt!
   if (wc) {
     registerWebContents(runInput.sessionId, wc)

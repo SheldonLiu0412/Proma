@@ -121,6 +121,7 @@ import {
   removeQueuedMessage,
   restoreQueuedMessageToFront,
 } from '@/lib/agent-message-queue'
+import { replaceAgentSessionInFreshnessOrder } from '@/lib/agent-session-list'
 import type { AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message-queue'
 
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
@@ -453,6 +454,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const setPromptSuggestions = useSetAtom(agentPromptSuggestionsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const openSession = useOpenSession()
+  const modelPersistSequenceRef = React.useRef(0)
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
   const attachedDirs = attachedDirsMap.get(sessionId) ?? []
@@ -1400,6 +1402,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
   /** ModelSelector 选择回调 */
   const handleModelSelect = React.useCallback((option: ModelOption): void => {
+    const persistSequence = modelPersistSequenceRef.current + 1
+    modelPersistSequenceRef.current = persistSequence
+
     // 更新当前会话的 per-session 配置
     setSessionChannelMap((prev) => {
       const map = new Map(prev)
@@ -1439,7 +1444,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       agentModelId: option.modelId,
       agentChannelIds: updatedChannelIds,
     }).catch(console.error)
-  }, [sessionId, setSessionChannelMap, setSessionModelMap, setDefaultChannelId, setDefaultModelId, agentChannelIds, setAgentChannelIds])
+
+    window.electronAPI.updateAgentSessionModel(sessionId, option.modelId, option.channelId)
+      .then((updated) => {
+        if (modelPersistSequenceRef.current !== persistSequence) return
+        setAgentSessions((prev) => replaceAgentSessionInFreshnessOrder(prev, updated))
+      })
+      .catch((error) => {
+        console.error('[AgentView] 持久化会话模型失败:', error)
+      })
+  }, [sessionId, setSessionChannelMap, setSessionModelMap, setStreamingStates, setDefaultChannelId, setDefaultModelId, agentChannelIds, setAgentChannelIds, setAgentSessions])
 
   /** 构建 externalSelectedModel 给 ModelSelector */
   const computedSelectedModel = React.useMemo(() => {
@@ -1885,7 +1899,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
     try {
       const meta = await window.electronAPI.createAgentSession(
-        undefined, agentChannelId, currentWorkspaceId || undefined,
+        undefined, agentChannelId, currentWorkspaceId || undefined, agentModelId || undefined,
       )
       setAgentSessions((prev) => [meta, ...prev])
 

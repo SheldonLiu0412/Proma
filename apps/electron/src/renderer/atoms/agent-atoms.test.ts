@@ -88,6 +88,70 @@ describe('applyAgentEvent run_resumed 兼容态', () => {
   })
 })
 
+describe('applyAgentEvent Pi 过程事件兼容', () => {
+  test('Given task_progress 没有 elapsedSeconds When 携带描述和用量 Then 保留到工具活动状态', () => {
+    const prev: AgentStreamState = {
+      running: true,
+      content: '',
+      toolActivities: [{
+        toolUseId: 'task-tool-1',
+        toolName: 'Task',
+        input: {},
+        done: false,
+      }],
+    }
+
+    const next = applyAgentEvent(prev, {
+      type: 'task_progress',
+      toolUseId: 'task-tool-1',
+      taskId: 'task-1',
+      description: '分析项目结构',
+      lastToolName: 'Read',
+      usage: {
+        totalTokens: 1200,
+        toolUses: 3,
+        durationMs: 2400,
+      },
+    })
+
+    expect(next.toolActivities[0]).toMatchObject({
+      toolUseId: 'task-tool-1',
+      taskId: 'task-1',
+      intent: '分析项目结构',
+      progressDescription: '分析项目结构',
+      lastToolName: 'Read',
+      usage: {
+        totalTokens: 1200,
+        toolUses: 3,
+        durationMs: 2400,
+      },
+    })
+  })
+
+  test('Given tool_use_summary 事件 When 应用到流式状态 Then 生成可展示的工具摘要活动', () => {
+    const prev: AgentStreamState = {
+      running: true,
+      content: '',
+      toolActivities: [],
+    }
+
+    const next = applyAgentEvent(prev, {
+      type: 'tool_use_summary',
+      summary: '读取并汇总了 3 个配置文件',
+      precedingToolUseIds: ['read-1', 'read-2'],
+    })
+
+    expect(next.toolActivities).toHaveLength(1)
+    expect(next.toolActivities[0]).toMatchObject({
+      toolUseId: 'tool-use-summary:read-1,read-2',
+      toolName: 'tool_use_summary',
+      displayName: '工具摘要',
+      result: '读取并汇总了 3 个配置文件',
+      done: true,
+    })
+  })
+})
+
 describe('shouldApplyStreamComplete 代际保护', () => {
   test('Given 新运行已开始 When 旧 complete 晚到 Then 忽略旧完成事件', () => {
     const current: AgentStreamState = {

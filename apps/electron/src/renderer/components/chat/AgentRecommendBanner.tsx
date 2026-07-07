@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/button'
 import { pendingAgentRecommendationAtom } from '@/atoms/chat-atoms'
 import {
   agentChannelIdAtom,
+  agentModelIdAtom,
   agentWorkspacesAtom,
   agentSessionsAtom,
   currentAgentSessionIdAtom,
@@ -50,6 +51,7 @@ export function AgentRecommendBanner(): React.ReactElement | null {
       toast.error('请先在设置中配置 Agent 渠道')
       return
     }
+    const agentModelId = store.get(agentModelIdAtom)
 
     // 保存推荐数据后立即清除，避免模式切换时 ChatView 副作用
     const { conversationId, suggestedPrompt } = recommendation
@@ -65,6 +67,7 @@ export function AgentRecommendBanner(): React.ReactElement | null {
         undefined,
         agentChannelId,
         defaultWorkspaceId ?? undefined,
+        agentModelId ?? undefined,
       )
 
       // 2. 迁移 Chat 对话记录到新 Agent 会话

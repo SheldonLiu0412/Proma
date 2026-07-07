@@ -317,8 +317,150 @@ function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function getStringFieldFromKeys(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = getStringField(record, key)
+    if (value && value.trim()) return value
+  }
+  return undefined
+}
+
+function getStringFieldAllowEmptyFromKeys(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string') return value
+  }
+  return undefined
+}
+
+function normalizeAuthType(value: string | undefined): string | undefined {
+  return value?.trim().toLowerCase().replace(/[\s_-]+/g, '')
+}
+
+function readHeaderRecord(serverName: string, value: unknown, fieldName: string): Record<string, string> {
+  if (!isPlainRecord(value)) {
+    throw new Error(`MCP server ${serverName} 的 auth.${fieldName} 必须是字符串键值对象`)
+  }
+
+  const headers: Record<string, string> = {}
+  for (const [key, headerValue] of Object.entries(value)) {
+    if (typeof headerValue !== 'string') {
+      throw new Error(`MCP server ${serverName} 的 auth.${fieldName}.${key} 必须是字符串`)
+    }
+    if (key.trim() && headerValue.trim()) headers[key] = headerValue
+  }
+  return headers
+}
+
+function buildBearerAuthHeader(token: string): string {
+  return /^Bearer\s+/i.test(token) ? token : `Bearer ${token}`
+}
+
+function buildBasicAuthHeader(username: string, password: string): string {
+  return `Basic ${Buffer.from(`${username}:${password}`, 'utf-8').toString('base64')}`
+}
+
+function setMappedAuthHeader(
+  serverName: string,
+  headers: Record<string, string>,
+  headerName: string,
+  value: string,
+): void {
+  const existingKey = Object.keys(headers).find((key) => key.toLowerCase() === headerName.toLowerCase())
+  if (existingKey && headers[existingKey] !== value) {
+    console.warn(`[MCP Bridge] MCP server ${serverName} 的 auth 同时映射到 ${headerName}，后写入值将覆盖前值`)
+    delete headers[existingKey]
+  }
+  headers[headerName] = value
+}
+
+function unsupportedAuthError(serverName: string, detail: string): Error {
+  return new Error(
+    `MCP server ${serverName} 的远程 auth 配置暂不支持：${detail}。` +
+    '当前 Pi MCP bridge 只能安全映射 bearer/basic/header/apiKey 到 HTTP headers；' +
+    '请改用 headers.Authorization 或上述可映射 auth 形态。',
+  )
+}
+
+function buildAuthMappedHeaders(serverName: string, auth: Record<string, unknown> | undefined): Record<string, string> {
+  if (!auth || Object.keys(auth).length === 0) return {}
+  if ('authProvider' in auth) throw unsupportedAuthError(serverName, 'authProvider/OAuth provider')
+
+  const headers: Record<string, string> = {}
+  const rawHeaders = auth.headers
+  if (rawHeaders !== undefined) {
+    Object.assign(headers, readHeaderRecord(serverName, rawHeaders, 'headers'))
+  }
+
+  const authType = normalizeAuthType(
+    getStringFieldFromKeys(auth, ['type', 'kind', 'scheme', 'authType']),
+  )
+  const directAuthorization = getStringFieldFromKeys(auth, ['Authorization', 'authorization'])
+  if (directAuthorization) {
+    setMappedAuthHeader(serverName, headers, 'Authorization', directAuthorization)
+  }
+
+  if (authType === 'none' || authType === 'noauth' || authType === 'disabled') return headers
+
+  const bearerToken = getStringFieldFromKeys(auth, ['bearerToken', 'accessToken', 'token', 'value', 'bearer'])
+  const username = getStringFieldFromKeys(auth, ['username', 'user'])
+  const password = getStringFieldAllowEmptyFromKeys(auth, ['password', 'pass'])
+
+  if (authType === 'bearer' || authType === 'bearertoken') {
+    if (!bearerToken) throw unsupportedAuthError(serverName, 'bearer auth 缺少 token')
+    setMappedAuthHeader(serverName, headers, 'Authorization', buildBearerAuthHeader(bearerToken))
+    return headers
+  }
+
+  if (authType === 'basic' || authType === 'basicauth') {
+    if (!username || password === undefined) throw unsupportedAuthError(serverName, 'basic auth 缺少 username/password')
+    setMappedAuthHeader(serverName, headers, 'Authorization', buildBasicAuthHeader(username, password))
+    return headers
+  }
+
+  if (authType === 'header' || authType === 'apikey') {
+    const headerName = getStringFieldFromKeys(auth, ['headerName', 'header_name', 'header', 'name'])
+    const headerValue = getStringFieldFromKeys(auth, ['apiKey', 'key', 'token', 'value'])
+    if (!headerName || !headerValue) throw unsupportedAuthError(serverName, `${authType} auth 缺少 headerName/name 或 value/token`)
+    setMappedAuthHeader(serverName, headers, headerName, headerValue)
+    return headers
+  }
+
+  if (!authType) {
+    if (bearerToken) {
+      setMappedAuthHeader(serverName, headers, 'Authorization', buildBearerAuthHeader(bearerToken))
+      return headers
+    }
+    if (username && password !== undefined) {
+      setMappedAuthHeader(serverName, headers, 'Authorization', buildBasicAuthHeader(username, password))
+      return headers
+    }
+    if (Object.keys(headers).length > 0 || directAuthorization) return headers
+    throw unsupportedAuthError(serverName, '缺少可识别的 type/kind/scheme')
+  }
+
+  throw unsupportedAuthError(serverName, `type=${authType}`)
+}
+
 function hasHeaders(headers: Record<string, string> | undefined): headers is Record<string, string> {
   return Boolean(headers && Object.keys(headers).length > 0)
+}
+
+function mergeRemoteHeaders(serverName: string, config: PromaMcpServerConfig): Record<string, string> | undefined {
+  const authHeaders = buildAuthMappedHeaders(serverName, config.auth)
+  const explicitHeaders = config.headers ?? {}
+  const merged: Record<string, string> = { ...authHeaders }
+  for (const [explicitKey, explicitValue] of Object.entries(explicitHeaders)) {
+    const authKey = Object.keys(merged).find((key) => key.toLowerCase() === explicitKey.toLowerCase())
+    if (authKey) {
+      if (merged[authKey] !== explicitValue) {
+        console.warn(`[MCP Bridge] MCP server ${serverName} 同时配置了 headers.${explicitKey} 和 auth 映射，优先使用 headers.${explicitKey}`)
+      }
+      delete merged[authKey]
+    }
+    merged[explicitKey] = explicitValue
+  }
+  return hasHeaders(merged) ? merged : undefined
 }
 
 function mergeHeaderInit(existing: HeadersInit | undefined, headers: Record<string, string>): Headers {
@@ -846,8 +988,9 @@ async function createTransport(
   }
 
   if (!config.url) throw new Error(`MCP server ${serverName} 缺少 url`)
-  const requestInit = hasHeaders(config.headers)
-    ? { headers: config.headers }
+  const headers = mergeRemoteHeaders(serverName, config)
+  const requestInit = hasHeaders(headers)
+    ? { headers }
     : undefined
   const url = new URL(config.url)
 
@@ -857,12 +1000,18 @@ async function createTransport(
       requestInit,
       fetch: fetchFn,
       eventSourceInit: {
-        fetch: createHeaderFetch(config.headers, fetchFn),
+        fetch: createHeaderFetch(headers, fetchFn),
       },
     })
   }
 
   if (config.type === 'websocket') {
+    if (hasHeaders(headers)) {
+      throw new Error(
+        `MCP server ${serverName} 使用 websocket 传输，但当前 SDK WebSocket transport 不支持注入 headers/auth。` +
+        '请改用 http/sse MCP 端点，或把认证信息放入服务端支持的 ws/wss URL 参数。',
+      )
+    }
     const { WebSocketClientTransport } = await import('@modelcontextprotocol/sdk/client/websocket.js')
     return new WebSocketClientTransport(url)
   }

@@ -1119,6 +1119,7 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
         undefined,
         agentChannelId || undefined,
         targetWorkspaceId,
+        agentModelId || undefined,
       )
       if (targetWorkspaceId) {
         setCollapsedWorkspaceIds((prev) => deleteSetEntry(prev, targetWorkspaceId))

@@ -7,7 +7,7 @@
 
 import { atom } from 'jotai'
 import { atomFamily, atomWithStorage } from 'jotai/utils'
-import type { AgentSessionMeta, AgentEvent, AgentWorkspace, AgentPendingFile, RetryAttempt, PromaPermissionMode, PermissionRequest, AskUserRequest, ExitPlanModeRequest, ThinkingConfig, AgentEffort, SDKMessage, UnstagedChangesResult } from '@proma/shared'
+import type { AgentSessionMeta, AgentEvent, AgentWorkspace, AgentPendingFile, RetryAttempt, PromaPermissionMode, PermissionRequest, AskUserRequest, ExitPlanModeRequest, ThinkingConfig, AgentEffort, SDKMessage, UnstagedChangesResult, TaskUsage } from '@proma/shared'
 import { PROMA_DEFAULT_PERMISSION_MODE } from '@proma/shared'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
 import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
@@ -28,6 +28,9 @@ export interface ToolActivity {
   parentToolUseId?: string
   elapsedSeconds?: number
   taskId?: string
+  progressDescription?: string
+  lastToolName?: string
+  usage?: TaskUsage
   shellId?: string
   isBackground?: boolean
   /** MCP 工具返回的图片附件 */
@@ -753,19 +756,52 @@ export function applyAgentEvent(
         ),
       }
 
-    case 'task_progress':
-      // 普通 tool 计时语义（仅当有真实 elapsedSeconds 时更新）
-      if (event.elapsedSeconds != null) {
+    case 'task_progress': {
+      const hasProgressPayload = event.elapsedSeconds != null
+        || event.taskId != null
+        || event.description != null
+        || event.lastToolName != null
+        || event.usage != null
+      if (!hasProgressPayload) return prev
+
+      let matched = false
+      const toolActivities = prev.toolActivities.map((t) => {
+        const isMatch = t.toolUseId === event.toolUseId
+          || (event.taskId != null && t.taskId === event.taskId)
+        if (!isMatch) return t
+
+        matched = true
         return {
-          ...prev,
-          toolActivities: prev.toolActivities.map((t) =>
-            t.toolUseId === event.toolUseId
-              ? { ...t, elapsedSeconds: event.elapsedSeconds! }
-              : t
-          ),
+          ...t,
+          ...(event.elapsedSeconds != null && { elapsedSeconds: event.elapsedSeconds }),
+          ...(event.taskId != null && { taskId: event.taskId }),
+          ...(event.description != null && {
+            intent: event.description,
+            progressDescription: event.description,
+          }),
+          ...(event.lastToolName != null && { lastToolName: event.lastToolName }),
+          ...(event.usage != null && { usage: event.usage }),
         }
+      })
+
+      if (matched) return { ...prev, toolActivities }
+
+      return {
+        ...prev,
+        toolActivities: [...prev.toolActivities, {
+          toolUseId: event.toolUseId,
+          toolName: 'Task',
+          input: {},
+          intent: event.description ?? event.lastToolName,
+          done: false,
+          ...(event.elapsedSeconds != null && { elapsedSeconds: event.elapsedSeconds }),
+          ...(event.taskId != null && { taskId: event.taskId }),
+          ...(event.description != null && { progressDescription: event.description }),
+          ...(event.lastToolName != null && { lastToolName: event.lastToolName }),
+          ...(event.usage != null && { usage: event.usage }),
+        }],
       }
-      return prev
+    }
 
     case 'task_started': {
       // 查找匹配 toolUseId 的 ToolActivity，更新 intent 和 taskId
@@ -804,9 +840,34 @@ export function applyAgentEvent(
         thinkingEstimatedTokens: event.estimatedTokens,
       }
 
-    case 'tool_use_summary':
-      // 工具使用摘要 — 目前不影响流式状态，仅用于 UI 展示
-      return prev
+    case 'tool_use_summary': {
+      const summaryId = event.precedingToolUseIds.length > 0
+        ? `tool-use-summary:${event.precedingToolUseIds.join(',')}`
+        : `tool-use-summary:${event.summary}`
+      const summaryActivity: ToolActivity = {
+        toolUseId: summaryId,
+        toolName: 'tool_use_summary',
+        input: { precedingToolUseIds: event.precedingToolUseIds },
+        displayName: '工具摘要',
+        result: event.summary,
+        done: true,
+      }
+
+      const existing = prev.toolActivities.find((t) => t.toolUseId === summaryId)
+      if (existing) {
+        return {
+          ...prev,
+          toolActivities: prev.toolActivities.map((t) =>
+            t.toolUseId === summaryId ? { ...t, ...summaryActivity } : t
+          ),
+        }
+      }
+
+      return {
+        ...prev,
+        toolActivities: [...prev.toolActivities, summaryActivity],
+      }
+    }
 
     case 'complete': {
       // 成功完成 — 清除 retrying，但保持 running: true

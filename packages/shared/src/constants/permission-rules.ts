@@ -20,6 +20,8 @@ export const SAFE_TOOLS: readonly string[] = [
   'GetMcpPromptTool',
   'TodoRead',        // Todo 列表读取
   'TodoWrite',       // Todo 列表写入（无安全风险）
+  'TaskCreate',      // 可见进度任务创建（Proma 内置，无外部副作用）
+  'TaskUpdate',      // 可见进度任务更新（Proma 内置，无外部副作用）
   'TaskOutput',      // 后台任务输出
   // 注意：AskUserQuestion 不在此列表 — 由 canUseTool 拦截并展示交互式 UI
 ]

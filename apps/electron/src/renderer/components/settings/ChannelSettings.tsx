@@ -3,8 +3,7 @@
  *
  * 分为两个区块：
  * 1. 渠道管理 — 所有渠道列表 + 添加/编辑/删除（渠道同时用于 Chat 和 Agent）
- * 2. Agent 供应商 — 从已启用的 Anthropic 兼容渠道（Anthropic / DeepSeek / Kimi / MiniMax）中
- *    通过 Switch 开关启用多个 Agent 供应商
+ * 2. Agent 供应商 — 从已启用的 Agent 兼容渠道中通过 Switch 开关启用多个 Agent 供应商
  */
 
 import * as React from 'react'
@@ -12,7 +11,7 @@ import { useAtom, useSetAtom } from 'jotai'
 import { Plus, Pencil, Trash2, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { PROVIDER_LABELS, isAgentCompatibleProvider } from '@proma/shared'
+import { AGENT_COMPATIBLE_PROVIDERS, PROVIDER_LABELS, isAgentCompatibleProvider } from '@proma/shared'
 import type { Channel } from '@proma/shared'
 import { getChannelLogo, PromaLogo } from '@/lib/model-logo'
 import { agentChannelIdAtom, agentModelIdAtom, agentChannelIdsAtom } from '@/atoms/agent-atoms'
@@ -32,6 +31,10 @@ import { ChannelForm } from './ChannelForm'
 
 /** 组件视图模式 */
 type ViewMode = 'list' | 'create' | 'edit'
+
+const AGENT_COMPATIBLE_PROVIDER_TEXT = Array.from(AGENT_COMPATIBLE_PROVIDERS)
+  .map((provider) => PROVIDER_LABELS[provider])
+  .join(' / ')
 
 export function ChannelSettings(): React.ReactElement {
   const [channels, setChannels] = React.useState<Channel[]>([])
@@ -204,7 +207,7 @@ export function ChannelSettings(): React.ReactElement {
     )
   }
 
-  // Agent 兼容渠道（已启用）：Anthropic / DeepSeek / Kimi API / Kimi Coding Plan / MiniMax
+  // Agent 兼容渠道（已启用）：以 AGENT_COMPATIBLE_PROVIDERS 为唯一真源
   const agentCapableChannels = channels.filter(
     (c) => isAgentCompatibleProvider(c.provider) && c.enabled
   )
@@ -215,7 +218,7 @@ export function ChannelSettings(): React.ReactElement {
       {/* 区块一：模型配置 */}
       <SettingsSection
         title="模型配置"
-        description="管理 AI 供应商连接，配置 API Key 和可用模型。Anthropic 渠道同时可用于 Agent 模式"
+        description="管理 AI 供应商连接，配置 API Key 和可用模型。支持 Agent 的渠道可同时用于 Agent 模式"
         action={
           <Button size="sm" onClick={() => setViewMode('create')}>
             <Plus size={16} />
@@ -264,8 +267,11 @@ export function ChannelSettings(): React.ReactElement {
           <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
         ) : agentCapableChannels.length === 0 ? (
           <SettingsCard divided={false}>
-            <div className="text-sm text-muted-foreground py-8 text-center">
-              暂无可用的 Anthropic 兼容渠道，请先在上方添加 Anthropic / DeepSeek / Kimi / MiniMax 渠道并启用
+            <div className="space-y-1 py-8 text-center text-sm text-muted-foreground">
+              <div>暂无可用的 Agent 兼容渠道，请先在上方添加并启用支持 Agent 的渠道。</div>
+              <div className="mx-auto max-w-2xl text-xs text-muted-foreground/70">
+                支持：{AGENT_COMPATIBLE_PROVIDER_TEXT}
+              </div>
             </div>
           </SettingsCard>
         ) : (

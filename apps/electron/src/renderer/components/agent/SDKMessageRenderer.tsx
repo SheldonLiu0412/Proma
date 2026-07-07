@@ -73,6 +73,7 @@ import type {
   AgentEventUsage,
   SDKToolUseBlock,
   SDKToolResultBlock,
+  SDKToolUseSummaryMessage,
   RecoveryAction,
 } from '@proma/shared'
 import type { AgentPendingFile } from '@proma/shared'
@@ -156,6 +157,45 @@ function PermissionDeniedNotice({ message }: { message: SDKSystemMessage }): Rea
             <p className="break-words text-muted-foreground/70">{reason}</p>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+interface ToolUseSummaryItem {
+  id: string
+  summary: string
+}
+
+function extractToolUseSummaryItems(messages: SDKMessage[]): ToolUseSummaryItem[] {
+  const items: ToolUseSummaryItem[] = []
+  const seen = new Set<string>()
+
+  for (const msg of messages) {
+    if (msg.type !== 'tool_use_summary') continue
+    const summaryMsg = msg as SDKToolUseSummaryMessage
+    const summary = summaryMsg.summary?.trim()
+    if (!summary) continue
+
+    const ids = summaryMsg.preceding_tool_use_ids ?? []
+    const id = ids.length > 0
+      ? `tool-use-summary:${ids.join(',')}`
+      : `tool-use-summary:${summary}`
+    if (seen.has(id)) continue
+    seen.add(id)
+    items.push({ id, summary })
+  }
+
+  return items
+}
+
+function ToolUseSummaryNotice({ summary }: { summary: string }): React.ReactElement {
+  return (
+    <div className="flex items-start gap-2 rounded-md bg-muted/35 px-3 py-2 text-[13px] text-muted-foreground">
+      <Wrench className="mt-0.5 size-3.5 shrink-0 text-muted-foreground/70" />
+      <div className="min-w-0">
+        <span className="font-medium text-foreground/70">工具摘要</span>
+        <span className="ml-2 whitespace-pre-wrap break-words">{summary}</span>
       </div>
     </div>
   )
@@ -298,6 +338,7 @@ function buildTaskProgressData(
   firstTaskIndex: number
 } {
   const taskBlocks: SDKToolUseBlock[] = []
+  const systemTaskActivities: ToolActivity[] = []
   let firstTaskIndex = -1
 
   for (let i = 0; i < topLevelBlocks.length; i++) {
@@ -310,6 +351,11 @@ function buildTaskProgressData(
 
   const toolResultMap = new Map<string, string>()
   for (const msg of turnMessages) {
+    if (msg.type === 'system') {
+      const activity = buildSystemTaskActivity(msg as SDKSystemMessage)
+      if (activity) systemTaskActivities.push(activity)
+    }
+
     if (msg.type !== 'user') continue
     const userMsg = msg as SDKUserMessage
     const blocks = userMsg.message?.content
@@ -331,7 +377,54 @@ function buildTaskProgressData(
     done: true,
   }))
 
-  return { taskActivities, firstTaskIndex }
+  return { taskActivities: [...taskActivities, ...systemTaskActivities], firstTaskIndex }
+}
+
+function buildSystemTaskActivity(message: SDKSystemMessage): ToolActivity | null {
+  if (
+    message.subtype !== 'task_started'
+    && message.subtype !== 'task_progress'
+    && message.subtype !== 'task_notification'
+  ) {
+    return null
+  }
+
+  const taskId = message.task_id
+  if (!taskId) return null
+
+  const description = message.description || message.summary || `任务 #${taskId}`
+  const activeForm = message.last_tool_name
+    ? `正在执行 ${message.last_tool_name}`
+    : message.subtype === 'task_notification'
+      ? message.summary
+      : message.description
+  const status = message.subtype === 'task_notification'
+    ? (message.status === 'completed' ? 'completed' : 'pending')
+    : message.subtype === 'task_started'
+      ? 'pending'
+      : 'in_progress'
+
+  const usage = message.usage ? {
+    totalTokens: message.usage.total_tokens ?? 0,
+    toolUses: message.usage.tool_uses ?? 0,
+    durationMs: message.usage.duration_ms ?? 0,
+  } : undefined
+
+  return {
+    toolUseId: message.tool_use_id ?? taskId,
+    toolName: 'TaskUpdate',
+    input: {
+      taskId,
+      subject: description,
+      status,
+      ...(activeForm && { activeForm }),
+    },
+    intent: description,
+    ...(message.description && { progressDescription: message.description }),
+    ...(message.last_tool_name && { lastToolName: message.last_tool_name }),
+    ...(usage && { usage }),
+    done: message.subtype === 'task_notification',
+  }
 }
 
 /**
@@ -444,6 +537,9 @@ export function AssistantTurnRenderer({ turn, allMessages, historicalTaskSubject
 
   // 从 turnMessages 中提取 result 消息的耗时和用量
   const { durationMs, usage } = extractTurnUsage(turn.turnMessages)
+  const toolUseSummaries = React.useMemo(() => {
+    return extractToolUseSummaryItems(turn.turnMessages)
+  }, [turn.turnMessages])
 
   // 只在用户点击停止时显示中断徽章。
   // aborted_streaming / aborted_tools 是流式追加消息时的软中断，语义是继续补充信息。
@@ -505,7 +601,7 @@ export function AssistantTurnRenderer({ turn, allMessages, historicalTaskSubject
   }
 
   // 如果没有任何内容
-  if (enrichedBlocks.length === 0 && !hasError) return null
+  if (enrichedBlocks.length === 0 && !hasError && toolUseSummaries.length === 0) return null
 
   const renderTopLevelBlock = (block: SDKContentBlock, i: number): React.ReactNode => {
     // Task 工具块：聚合为卡片，此处用索引定位首个任务工具
@@ -547,6 +643,7 @@ export function AssistantTurnRenderer({ turn, allMessages, historicalTaskSubject
   const renderProcessGroupBlock = (block: SDKContentBlock, i: number): React.ReactNode => {
     return renderTopLevelBlock(block, i)
   }
+  const shouldRenderDetachedTaskProgress = firstTaskIndex === -1 && taskActivities.length > 0
 
   return (
     <Message from="assistant">
@@ -576,6 +673,16 @@ export function AssistantTurnRenderer({ turn, allMessages, historicalTaskSubject
               </ProcessBlockGroup>
             )
           })}
+          {shouldRenderDetachedTaskProgress && (
+            <TaskProgressCard
+              activities={taskActivities}
+              streamEnded={!isStreaming}
+              historicalTaskSubjects={historicalTaskSubjects}
+            />
+          )}
+          {toolUseSummaries.map((item) => (
+            <ToolUseSummaryNotice key={item.id} summary={item.summary} />
+          ))}
         </div>
         {/* 如果有错误但也有内容块，在末尾显示错误 */}
         {hasError && errorContent && topLevelBlocks.length > 0 && (
@@ -714,8 +821,41 @@ export function SDKMessageRenderer({
     if (subtype === 'permission_denied') {
       return <PermissionDeniedNotice message={sysMsg} />
     }
+    if (subtype === 'task_started' || subtype === 'task_progress' || subtype === 'task_notification') {
+      const activity = buildSystemTaskActivity(sysMsg)
+      if (!activity) return null
+      return (
+        <div className="pl-[46px] pr-1">
+          <TaskProgressCard
+            activities={[activity]}
+            streamEnded={subtype === 'task_notification'}
+            animate
+          />
+        </div>
+      )
+    }
 
     return null
+  }
+
+  if (msgType === 'tool_use_summary') {
+    const summaryMsg = message as SDKToolUseSummaryMessage
+    const summary = summaryMsg.summary?.trim()
+    if (!summary) return null
+
+    return (
+      <Message from="assistant">
+        {showHeader && (
+          <MessageHeader
+            time={formatMessageTime(Date.now())}
+            logo={<AssistantLogo />}
+          />
+        )}
+        <MessageContent>
+          <ToolUseSummaryNotice summary={summary} />
+        </MessageContent>
+      </Message>
+    )
   }
 
   return null

@@ -15,6 +15,7 @@ import { Bot, Loader2 } from 'lucide-react'
 import { MessageAction } from '@/components/ai-elements/message'
 import {
   agentChannelIdAtom,
+  agentModelIdAtom,
   agentWorkspacesAtom,
   agentSessionsAtom,
   currentAgentSessionIdAtom,
@@ -41,6 +42,7 @@ export function MigrateToAgentButton({ conversationId }: MigrateToAgentButtonPro
       toast.error('请先在设置中配置 Agent 渠道')
       return
     }
+    const agentModelId = store.get(agentModelIdAtom)
 
     setMigrating(true)
     try {
@@ -52,6 +54,7 @@ export function MigrateToAgentButton({ conversationId }: MigrateToAgentButtonPro
         undefined,
         agentChannelId,
         defaultWorkspaceId ?? undefined,
+        agentModelId ?? undefined,
       )
 
       // 2. 迁移 Chat 对话记录到新 Agent 会话

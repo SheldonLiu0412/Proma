@@ -101,6 +101,8 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   maxBudgetUsd?: number
   outputFormat?: JsonSchemaOutputFormat
   additionalDirectories?: string[]
+  /** Proma 内部只读上下文目录，只允许 read/grep/find/ls 访问，不能作为 Write/Edit 根目录 */
+  readOnlyAdditionalDirectories?: string[]
   additionalSkillPaths?: string[]
   /** 当前用户输入显式引用的 Skill name（兼容历史 slug 已在编排层归一化） */
   skillMentions?: string[]
@@ -774,11 +776,11 @@ function shouldUseRuntimeApiKey(provider: ProviderType): boolean {
   return !usesBearerOnlyAnthropicAuth(provider)
 }
 
-function thinkingLevelFromOptions(thinking?: ThinkingConfig, effort?: AgentEffort): ThinkingLevel {
-  if (thinking?.type === 'disabled') return 'minimal'
+export function thinkingLevelFromOptions(thinking?: ThinkingConfig, effort?: AgentEffort): ThinkingLevel {
+  if (!thinking || thinking.type === 'disabled') return 'off'
   // 固定思考预算（enabled）：pi 用离散思考等级而非 token 预算，按 budgetTokens 量级映射到最接近的等级，
   // 避免用户设定的预算被静默丢弃、与「未设置」无差别
-  if (thinking?.type === 'enabled') {
+  if (thinking.type === 'enabled') {
     const budget = thinking.budgetTokens
     if (budget <= 2048) return 'low'
     if (budget <= 8192) return 'medium'
@@ -1274,14 +1276,31 @@ function resolveGuardedRealPath(path: string): string {
   return tail ? resolve(nearestReal, tail) : nearestReal
 }
 
-function buildAllowedToolRoots(cwd: string, additionalDirectories: string[] | undefined): string[] {
-  const candidates = [cwd, ...(additionalDirectories ?? [])]
+export interface PiAllowedToolRoots {
+  readRoots: string[]
+  writeRoots: string[]
+}
+
+function compactAllowedRoots(paths: string[]): string[] {
+  const candidates = paths
     .map((path) => resolveGuardedRealPath(path))
     .filter((path, index, arr) => arr.indexOf(path) === index)
   return candidates.filter((path, index, arr) => !arr.some((other, otherIndex) => {
     if (index === otherIndex || path === other) return false
     return isPathWithinRoot(path, other)
   }))
+}
+
+export function buildAllowedToolRoots(
+  cwd: string,
+  additionalDirectories: string[] | undefined,
+  readOnlyAdditionalDirectories: string[] | undefined,
+): PiAllowedToolRoots {
+  const writablePaths = [cwd, ...(additionalDirectories ?? [])]
+  return {
+    writeRoots: compactAllowedRoots(writablePaths),
+    readRoots: compactAllowedRoots([...writablePaths, ...(readOnlyAdditionalDirectories ?? [])]),
+  }
 }
 
 function resolveToolPath(value: unknown, cwd: string): string | undefined {
@@ -1300,25 +1319,25 @@ function assertPiBuiltinToolPathsAllowed(
   piName: string,
   input: Record<string, unknown>,
   cwd: string,
-  allowedRoots: string[],
+  allowedRoots: PiAllowedToolRoots,
 ): void {
-  const pathKeys = (() => {
+  const guardConfig = (() => {
     switch (piName) {
       case 'read':
-      case 'write':
-      case 'edit':
-        return ['path', 'file_path']
       case 'grep':
       case 'find':
       case 'ls':
-        return ['path', 'file_path', 'directory']
+        return { keys: ['path', 'file_path', 'directory'], roots: allowedRoots.readRoots }
+      case 'write':
+      case 'edit':
+        return { keys: ['path', 'file_path'], roots: allowedRoots.writeRoots }
       default:
-        return []
+        return { keys: [], roots: allowedRoots.writeRoots }
     }
   })()
-  for (const key of pathKeys) {
+  for (const key of guardConfig.keys) {
     const target = resolveToolPath(input[key], cwd)
-    if (target) assertPathAllowed(target, allowedRoots)
+    if (target) assertPathAllowed(target, guardConfig.roots)
   }
 }
 
@@ -1748,10 +1767,11 @@ function buildBuiltinToolDefinitions(
   sdk: PiSdk,
   cwd: string,
   additionalDirectories: string[] | undefined,
+  readOnlyAdditionalDirectories: string[] | undefined,
   canUseTool: PiAgentQueryOptions['canUseTool'],
   runtimeEnv: AgentRuntimeEnv | undefined,
 ): ToolDefinition[] {
-  const allowedRoots = buildAllowedToolRoots(cwd, additionalDirectories)
+  const allowedRoots = buildAllowedToolRoots(cwd, additionalDirectories, readOnlyAdditionalDirectories)
   const pathGuard = (toolName: string, input: Record<string, unknown>): void => {
     assertPiBuiltinToolPathsAllowed(toolName, input, cwd, allowedRoots)
   }
@@ -1856,7 +1876,14 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         : sdk.SessionManager.create(cwd, input.piSessionDir)
       const { authStorage, registry, model } = await buildModel(sdk, input)
       const customTools = [
-        ...buildBuiltinToolDefinitions(sdk, cwd, input.additionalDirectories, input.canUseTool, input.runtimeEnv),
+        ...buildBuiltinToolDefinitions(
+          sdk,
+          cwd,
+          input.additionalDirectories,
+          input.readOnlyAdditionalDirectories,
+          input.canUseTool,
+          input.runtimeEnv,
+        ),
         ...buildPromaProductToolDefinitions(sdk, input.canUseTool),
         ...wrapCustomToolDefinitions(input.customTools, input.canUseTool),
         // 子代理（Agent）委派工具：可插拔，单一开关控制。删除本段 + pi-subagent-tool.ts 即可彻底移除该能力。

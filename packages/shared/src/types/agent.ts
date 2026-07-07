@@ -345,6 +345,9 @@ export type ErrorCode =
   // 环境 / 配置类错误（本地可修复）
   | 'windows_shell_missing'
   | 'channel_not_found'
+  | 'channel_disabled'
+  | 'agent_provider_not_supported'
+  | 'agent_model_unavailable'
   | 'api_key_decrypt_failed'
   | 'agent_runtime_not_found'
   | 'session_busy'
@@ -781,10 +784,12 @@ export interface McpServerEntry {
   sessionId?: string
   /** Streamable HTTP 重连配置 */
   reconnectionOptions?: McpReconnectionOptions
-  /** 远程 MCP 认证配置占位；当前桥接只消费 headers，保留该字段避免配置丢失 */
+  /** 远程 MCP 认证配置；桥接会将常见 bearer/basic/header/apiKey 形态映射为 headers */
   auth?: Record<string, unknown>
   /** 是否启用 */
   enabled: boolean
+  /** 是否为必需 MCP；必需服务启动失败时应阻止本轮 Agent，默认 false */
+  required?: boolean
   /** 旧版/common 配置可能使用 disabled；保存前会迁移到 enabled */
   disabled?: boolean
   /** 是否为内置 MCP（不可删除，仅可配置 env） */
@@ -958,6 +963,8 @@ export interface AgentSendInput {
   triggeredBy?: 'user' | 'automation' | 'delegation'
   /** 定时任务执行上下文（注入到系统提示词，用户不可见） */
   automationContext?: string
+  /** 是否允许弹出桌面交互请求；headless/外部入口应设为 false，避免无人值守任务永久等待 */
+  interactive?: boolean
 }
 
 // ===== Agent 队列消息 =====
@@ -1407,6 +1414,8 @@ export const AGENT_IPC_CHANNELS = {
   GET_SDK_MESSAGES: 'agent:get-sdk-messages',
   /** 更新会话标题 */
   UPDATE_TITLE: 'agent:update-title',
+  /** 更新会话使用的模型/渠道 */
+  UPDATE_MODEL: 'agent:update-model',
   /** 删除会话 */
   DELETE_SESSION: 'agent:delete-session',
   /** 迁移 Chat 对话记录到 Agent 会话 */

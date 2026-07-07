@@ -58,6 +58,7 @@ export interface SubagentToolDeps {
     sdk: PiSdk,
     cwd: string,
     additionalDirectories: string[] | undefined,
+    readOnlyAdditionalDirectories: string[] | undefined,
     canUseTool: PiAgentQueryOptions['canUseTool'],
     runtimeEnv: PiAgentQueryOptions['runtimeEnv'],
   ) => ToolDefinition[]
@@ -194,6 +195,7 @@ export function createSubagentToolDefinition(deps: SubagentToolDeps): ToolDefini
           sdk,
           cwd,
           parentInput.additionalDirectories,
+          parentInput.readOnlyAdditionalDirectories,
           parentInput.canUseTool,
           parentInput.runtimeEnv,
         ),

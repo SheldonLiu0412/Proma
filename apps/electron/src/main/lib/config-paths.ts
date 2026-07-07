@@ -5,7 +5,7 @@
  * 所有用户配置存储在 ~/.proma/ 目录下。
  */
 
-import { join, basename } from 'node:path'
+import { join, basename, resolve, relative, isAbsolute } from 'node:path'
 import { mkdirSync, existsSync, cpSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 
@@ -275,6 +275,42 @@ export function getAgentWorkspacesDir(): string {
   return dir
 }
 
+const SAFE_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+function assertSafePathSegment(value: string, label: string): string {
+  if (
+    !SAFE_PATH_SEGMENT_PATTERN.test(value) ||
+    value === '.' ||
+    value === '..' ||
+    value.includes('/') ||
+    value.includes('\\')
+  ) {
+    throw new Error(`${label} 包含非法路径片段: ${value}`)
+  }
+  return value
+}
+
+export function assertSafeWorkspaceSlug(slug: string): string {
+  return assertSafePathSegment(slug, '工作区 slug')
+}
+
+export function assertSafeSessionId(sessionId: string): string {
+  return assertSafePathSegment(sessionId, 'Agent 会话 ID')
+}
+
+function resolveAgentWorkspaceRootPath(slug: string, options?: { createRoot?: boolean }): string {
+  const safeSlug = assertSafeWorkspaceSlug(slug)
+  const root = resolve(options?.createRoot === false
+    ? join(getConfigDir(), 'agent-workspaces')
+    : getAgentWorkspacesDir())
+  const dir = resolve(root, safeSlug)
+  const rel = relative(root, dir)
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`工作区路径越过 Proma 工作区根目录: ${dir}`)
+  }
+  return dir
+}
+
 /**
  * 获取指定 Agent 工作区的目录路径
  *
@@ -284,7 +320,7 @@ export function getAgentWorkspacesDir(): string {
  * @returns ~/.proma/agent-workspaces/{slug}/
  */
 export function getAgentWorkspacePath(slug: string): string {
-  const dir = join(getAgentWorkspacesDir(), slug)
+  const dir = resolveAgentWorkspaceRootPath(slug)
 
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
@@ -351,7 +387,7 @@ export function getWorkspaceFilesDir(slug: string): string {
  * @returns ~/.proma/agent-workspaces/{slug}/workspace-files/
  */
 export function resolveWorkspaceFilesDir(slug: string): string {
-  return join(getConfigDir(), 'agent-workspaces', slug, 'workspace-files')
+  return join(resolveAgentWorkspaceRootPath(slug, { createRoot: false }), 'workspace-files')
 }
 
 /**
@@ -365,7 +401,7 @@ export function resolveWorkspaceFilesDir(slug: string): string {
  * @returns ~/.proma/agent-workspaces/{slug}/{sessionId}/
  */
 export function resolveAgentSessionWorkspacePath(slug: string, sessionId: string): string {
-  return join(getConfigDir(), 'agent-workspaces', slug, sessionId)
+  return join(resolveAgentWorkspaceRootPath(slug, { createRoot: false }), assertSafeSessionId(sessionId))
 }
 
 /**
@@ -636,7 +672,7 @@ export function getFeishuBotMetadataPath(botId: string): string {
  * @returns ~/.proma/agent-workspaces/{slug}/{sessionId}/
  */
 export function getAgentSessionWorkspacePath(workspaceSlug: string, sessionId: string): string {
-  const dir = join(getAgentWorkspacePath(workspaceSlug), sessionId)
+  const dir = join(getAgentWorkspacePath(workspaceSlug), assertSafeSessionId(sessionId))
 
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })

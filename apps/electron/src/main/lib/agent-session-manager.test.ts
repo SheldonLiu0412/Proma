@@ -139,6 +139,30 @@ describe('Agent 会话 JSONL 读取', () => {
   })
 })
 
+describe('Agent 会话模型元数据', () => {
+  test('Given 创建 Agent 会话时传入模型 When 读取会话元数据 Then 持久化 channelId 与 modelId', () => {
+    const session = manager.createAgentSession('模型会话', 'channel-a', undefined, 'model-a')
+
+    expect(session.channelId).toBe('channel-a')
+    expect(session.modelId).toBe('model-a')
+    expect(manager.getAgentSessionMeta(session.id)?.modelId).toBe('model-a')
+  })
+
+  test('Given 已有 Agent 会话 When 切换模型和渠道 Then 会话元数据同步更新', () => {
+    const session = manager.createAgentSession('待切换会话', 'channel-a', undefined, 'model-a')
+
+    const updated = manager.updateAgentSessionMeta(session.id, {
+      channelId: 'channel-b',
+      modelId: 'model-b',
+    })
+
+    expect(updated.channelId).toBe('channel-b')
+    expect(updated.modelId).toBe('model-b')
+    expect(manager.getAgentSessionMeta(session.id)?.channelId).toBe('channel-b')
+    expect(manager.listAgentSessions().find((item) => item.id === session.id)?.modelId).toBe('model-b')
+  })
+})
+
 describe('legacy Claude file-history 兼容', () => {
   test('Given legacy file-history-snapshot 存在 When 恢复到旧 turn Then 使用备份覆盖并删除 target 后新增文件', () => {
     const cwd = join(tempHome, 'legacy-workspace')

@@ -92,6 +92,27 @@ const dashedBorderStyle = {
   backgroundImage: `url("data:image/svg+xml,%3csvg width='100%25' height='100%25' xmlns='http://www.w3.org/2000/svg'%3e%3crect width='100%25' height='100%25' fill='none' rx='8' ry='8' stroke='rgba(128,128,128,0.4)' stroke-width='1.5' stroke-dasharray='8%2c 6' stroke-dashoffset='0' stroke-linecap='round'/%3e%3c/svg%3e")`,
 } as const
 
+function formatTaskDuration(durationMs: number): string {
+  if (durationMs < 1000) return `${durationMs}ms`
+  const seconds = durationMs / 1000
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const minutes = Math.floor(seconds / 60)
+  const restSeconds = Math.round(seconds % 60)
+  return `${minutes}m ${restSeconds}s`
+}
+
+function buildUsageText(activities: ToolActivity[]): string | null {
+  const latest = [...activities].reverse().find((activity) => activity.usage)?.usage
+  if (!latest) return null
+
+  const parts: string[] = []
+  if (latest.totalTokens > 0) parts.push(`${latest.totalTokens.toLocaleString()} tokens`)
+  if (latest.toolUses > 0) parts.push(`${latest.toolUses} 次工具`)
+  if (latest.durationMs > 0) parts.push(formatTaskDuration(latest.durationMs))
+
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
 interface TaskProgressCardProps {
   /** 包含 TaskCreate/TaskUpdate/TodoWrite 的活动列表 */
   activities: ToolActivity[]
@@ -113,6 +134,7 @@ export function TaskProgressCard({ activities, animate = false, streamEnded = fa
   const totalCount = items.length
   const needsCollapse = items.length > MAX_VISIBLE
   const visibleItems = needsCollapse && !expanded ? items.slice(0, MAX_VISIBLE) : items
+  const usageText = buildUsageText(activities)
 
   return (
     <div className={cn('my-1', animate && 'animate-in fade-in duration-200')}>
@@ -122,7 +144,7 @@ export function TaskProgressCard({ activities, animate = false, streamEnded = fa
         style={dashedBorderStyle}
       >
         {/* 标题行 */}
-        <div className="flex items-center gap-1.5 mb-1.5">
+        <div className="flex min-w-0 items-center gap-1.5 mb-1.5">
           <ListTodo className="size-3.5 text-muted-foreground" />
           <span className="text-[13px] font-medium text-muted-foreground">
             任务进度
@@ -130,6 +152,11 @@ export function TaskProgressCard({ activities, animate = false, streamEnded = fa
           <span className="text-[11px] text-muted-foreground/50 tabular-nums">
             {completedCount}/{totalCount}
           </span>
+          {usageText && (
+            <span className="ml-auto max-w-[55%] truncate text-[11px] text-muted-foreground/50 tabular-nums">
+              {usageText}
+            </span>
+          )}
         </div>
 
         {/* 进度条 */}

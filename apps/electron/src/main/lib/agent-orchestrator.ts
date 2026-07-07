@@ -26,6 +26,7 @@ import {
   THINKING_SIGNATURE_ERROR_TITLE,
   isSafeBashCommand,
   isPersistableSDKSystemMessage,
+  isAgentCompatibleProvider,
   normalizeMcpTransportType,
 } from '@proma/shared'
 import type { PermissionRequest, PromaPermissionMode, AskUserRequest, ExitPlanModeRequest, SDKSystemMessage } from '@proma/shared'
@@ -409,12 +410,10 @@ function collectAttachedDirectories(params: {
   return result
 }
 
-function collectRuntimeAdditionalDirectories(params: {
-  sessionMeta?: AgentSessionMeta
+function collectRuntimeReadOnlyAdditionalDirectories(params: {
   workspaceSlug?: string
-  extraDirs?: string[]
 }): string[] {
-  const result = [...collectAttachedDirectories(params)]
+  const result: string[] = []
   const push = (dir: string | undefined | null) => {
     if (!dir) return
     if (!result.includes(dir)) result.push(dir)
@@ -581,6 +580,7 @@ export class AgentOrchestrator {
       if (!entry.enabled) continue
       if (name === 'memos-cloud') continue
       const type = normalizeMcpTransportType((entry as { type?: unknown }).type)
+      const required = entry.required ?? false
 
       if (type === 'stdio' && entry.command) {
         mcpServers[name] = {
@@ -589,7 +589,7 @@ export class AgentOrchestrator {
           ...(entry.args && entry.args.length > 0 && { args: entry.args }),
           ...(entry.env && Object.keys(entry.env).length > 0 && { env: entry.env }),
           ...(entry.cwd && { cwd: entry.cwd }),
-          required: false,
+          required,
           startup_timeout_sec: entry.startup_timeout_sec ?? entry.timeout ?? 30,
           ...(entry.tool_timeout_sec !== undefined && { tool_timeout_sec: entry.tool_timeout_sec }),
         }
@@ -604,10 +604,14 @@ export class AgentOrchestrator {
           ...(entry.sessionId && { sessionId: entry.sessionId }),
           ...(entry.reconnectionOptions && { reconnectionOptions: entry.reconnectionOptions }),
           ...(entry.auth && { auth: entry.auth }),
-          required: false,
+          required,
         }
       } else {
-        console.warn(`[Agent 编排] MCP 服务器 "${name}" 配置不完整，已跳过（type=${entry.type}, command=${entry.command ?? '无'}, url=${entry.url ?? '无'}）`)
+        const message = `MCP 服务器 "${name}" 配置不完整（type=${entry.type}, command=${entry.command ?? '无'}, url=${entry.url ?? '无'}）`
+        if (required) {
+          throw new Error(`${message}，但该服务器被标记为必需，已阻止本轮 Agent 运行`)
+        }
+        console.warn(`[Agent 编排] ${message}，已跳过`)
       }
     }
 
@@ -762,6 +766,7 @@ export class AgentOrchestrator {
       try { updateAgentSessionMeta(sessionId, { sdkSessionId: undefined }) } catch { /* 忽略 */ }
     }
     queryOptions.resumeSessionId = undefined
+    delete queryOptions.compactRequest
     queryOptions.prompt = buildRecoveryPrompt(sessionId, contextualMessage, { agentCwd, workspaceSlug })
     return retryReason
   }
@@ -827,6 +832,7 @@ export class AgentOrchestrator {
    */
   async sendMessage(input: AgentSendInput, callbacks: SessionCallbacks): Promise<void> {
     const { sessionId, userMessage, channelId, modelId, workspaceId, additionalDirectories, customMcpServers, permissionModeOverride, mentionedSkills, mentionedMcpServers, mentionedSessionIds, automationContext } = input
+    const isInteractiveRun = input.interactive !== false
     const diagnosticChunks: string[] = []
 
     // 0. 并发保护
@@ -904,6 +910,45 @@ export class AgentOrchestrator {
         canRetry: false,
       })
       return
+    }
+    if (!channel.enabled) {
+      reportPreflightError({
+        code: 'channel_disabled',
+        title: '渠道已停用',
+        message: '当前会话引用的渠道已停用，请在设置中重新启用或选择其他 Agent 渠道。',
+        actions: [
+          { key: 's', label: '打开渠道设置', action: 'open_channel_settings' },
+        ],
+        canRetry: false,
+      })
+      return
+    }
+    if (!isAgentCompatibleProvider(channel.provider)) {
+      reportPreflightError({
+        code: 'agent_provider_not_supported',
+        title: '渠道不支持 Agent 模式',
+        message: `当前渠道类型「${channel.provider}」只能用于 Chat，不能用于 Agent。请切换为 Anthropic 兼容的 Agent 渠道。`,
+        actions: [
+          { key: 's', label: '打开渠道设置', action: 'open_channel_settings' },
+        ],
+        canRetry: false,
+      })
+      return
+    }
+    if (modelId && channel.models.length > 0) {
+      const selectedModel = channel.models.find((model) => model.id === modelId)
+      if (!selectedModel || !selectedModel.enabled) {
+        reportPreflightError({
+          code: 'agent_model_unavailable',
+          title: '模型不可用',
+          message: `当前会话引用的模型「${modelId}」已不在该渠道可用模型列表中，或已被停用。请重新选择模型。`,
+          actions: [
+            { key: 's', label: '打开渠道设置', action: 'open_channel_settings' },
+          ],
+          canRetry: false,
+        })
+        return
+      }
     }
 
     let apiKey: string
@@ -1059,9 +1104,8 @@ export class AgentOrchestrator {
         sessionMeta,
         workspaceSlug,
       })
-      const runtimeAdditionalDirectories = collectRuntimeAdditionalDirectories({
-        extraDirs: additionalDirectories,
-        sessionMeta,
+      const runtimeAdditionalDirectories = allAttachedDirectories
+      const runtimeReadOnlyAdditionalDirectories = collectRuntimeReadOnlyAdditionalDirectories({
         workspaceSlug,
       })
 
@@ -1139,7 +1183,10 @@ export class AgentOrchestrator {
         workspaceName: workspace?.name,
         workspaceSlug,
         agentCwd,
-        additionalDirectories: runtimeAdditionalDirectories,
+        additionalDirectories: [
+          ...runtimeAdditionalDirectories,
+          ...runtimeReadOnlyAdditionalDirectories,
+        ],
       })
 
       // 11.5 注入 mention 引用指令（Skill/MCP/会话）— 仅影响 prompt，不影响持久化
@@ -1334,6 +1381,12 @@ export class AgentOrchestrator {
 
         // AskUserQuestion：始终走交互式问答流程，不受权限模式影响
         if (toolName === 'AskUserQuestion') {
+          if (!isInteractiveRun) {
+            return {
+              behavior: 'deny' as const,
+              message: '当前运行来自无人值守入口，无法等待桌面用户回答 AskUserQuestion；请基于现有上下文继续，或说明缺少哪些信息。',
+            }
+          }
           return askUserService.handleAskUserQuestion(
             sessionId, input, options.signal,
             (request: AskUserRequest) => {
@@ -1421,8 +1474,9 @@ export class AgentOrchestrator {
         piAgentDir: getSdkConfigDir(),
         piSessionDir: join(getSdkConfigDir(), 'sessions'),
         ...(customTools.length > 0 && { customTools }),
-        // 合并附加目录：用户当次输入 + 会话级 + 工作区级 + Proma 历史/记忆目录
+        // 区分可写附加目录与只读上下文目录，避免 Pi 工具误写 Proma 历史/配置目录。
         ...(runtimeAdditionalDirectories.length > 0 ? { additionalDirectories: runtimeAdditionalDirectories } : {}),
+        ...(runtimeReadOnlyAdditionalDirectories.length > 0 ? { readOnlyAdditionalDirectories: runtimeReadOnlyAdditionalDirectories } : {}),
         ...(workspaceSlug ? { additionalSkillPaths: [getWorkspaceSkillsDir(workspaceSlug)] } : {}),
         ...(mentionedSkillNames.length > 0 && { skillMentions: mentionedSkillNames }),
         // Pi 思考配置（从 settings 读取）
