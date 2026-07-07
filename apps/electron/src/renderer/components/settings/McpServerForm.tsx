@@ -1,7 +1,7 @@
 /**
  * McpServerForm - MCP 服务器创建/编辑表单
  *
- * 支持 stdio / http / sse 三种传输类型，
+ * 支持 stdio / http / sse / websocket 传输类型，
  * 复用设置原语组件实现卡片化布局。
  */
 
@@ -40,6 +40,7 @@ const TRANSPORT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'stdio', label: 'stdio（命令行）' },
   { value: 'http', label: 'HTTP（Streamable HTTP）' },
   { value: 'sse', label: 'SSE（Server-Sent Events）' },
+  { value: 'websocket', label: 'WebSocket（ws/wss）' },
 ]
 
 /**
@@ -82,8 +83,10 @@ interface McpFormValues {
   argsText: string
   envText: string
   timeoutStr: string
+  toolTimeoutStr: string
   url: string
   headersText: string
+  sessionId: string
 }
 
 /** 根据当前表单值构建 McpServerEntry */
@@ -100,6 +103,17 @@ function buildEntryFromValues(values: McpFormValues, includeTestResult = false):
     }),
   }
 
+  const startupTimeout = parseInt(values.timeoutStr, 10)
+  if (!isNaN(startupTimeout) && startupTimeout > 0) {
+    base.timeout = startupTimeout
+    base.startup_timeout_sec = startupTimeout
+  }
+
+  const toolTimeout = parseInt(values.toolTimeoutStr, 10)
+  if (!isNaN(toolTimeout) && toolTimeout > 0) {
+    base.tool_timeout_sec = toolTimeout
+  }
+
   if (values.transportType === 'stdio') {
     base.command = values.command.trim()
     const args = values.argsText
@@ -109,12 +123,11 @@ function buildEntryFromValues(values: McpFormValues, includeTestResult = false):
     if (args.length > 0) base.args = args
     const env = parseKeyValueText(values.envText, '=')
     if (Object.keys(env).length > 0) base.env = env
-    const timeout = parseInt(values.timeoutStr, 10)
-    if (!isNaN(timeout) && timeout > 0) base.timeout = timeout
   } else {
     base.url = values.url.trim()
     const headers = parseKeyValueText(values.headersText, ':')
     if (Object.keys(headers).length > 0) base.headers = headers
+    if (values.sessionId.trim()) base.sessionId = values.sessionId.trim()
   }
 
   return base
@@ -134,12 +147,20 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
   const [argsText, setArgsText] = React.useState(server?.entry.args?.join(', ') ?? '')
   const [envText, setEnvText] = React.useState(serializeKeyValueText(server?.entry.env, '='))
   const [timeoutStr, setTimeoutStr] = React.useState(
-    server?.entry.timeout != null ? String(server.entry.timeout) : ''
+    server?.entry.startup_timeout_sec != null
+      ? String(server.entry.startup_timeout_sec)
+      : server?.entry.timeout != null
+        ? String(server.entry.timeout)
+        : ''
+  )
+  const [toolTimeoutStr, setToolTimeoutStr] = React.useState(
+    server?.entry.tool_timeout_sec != null ? String(server.entry.tool_timeout_sec) : ''
   )
 
-  // http/sse 字段
+  // http/sse/websocket 字段
   const [url, setUrl] = React.useState(server?.entry.url ?? '')
   const [headersText, setHeadersText] = React.useState(serializeKeyValueText(server?.entry.headers, ':'))
+  const [sessionId, setSessionId] = React.useState(server?.entry.sessionId ?? '')
 
   // UI 状态
   const [saving, setSaving] = React.useState(false)
@@ -158,13 +179,13 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
 
   // 保留最新表单值，供 unmount 时 flush 待保存变更
   const latestValuesRef = React.useRef({
-    name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, testResult, isBuiltin,
+    name, transportType, command, url, argsText, envText, headersText, timeoutStr, toolTimeoutStr, sessionId, enabled, testResult, isBuiltin,
   })
   React.useEffect(() => {
     latestValuesRef.current = {
-      name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, testResult, isBuiltin,
+      name, transportType, command, url, argsText, envText, headersText, timeoutStr, toolTimeoutStr, sessionId, enabled, testResult, isBuiltin,
     }
-  }, [name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, testResult, isBuiltin])
+  }, [name, transportType, command, url, argsText, envText, headersText, timeoutStr, toolTimeoutStr, sessionId, enabled, testResult, isBuiltin])
 
   // 监听配置改变，清空测试结果（避免展示过期的测试结果）
   React.useEffect(() => {
@@ -178,12 +199,15 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
       (transportType !== 'stdio' && url !== (server.entry.url ?? '')) ||
       argsText !== (server.entry.args?.join(', ') ?? '') ||
       envText !== serializeKeyValueText(server.entry.env, '=') ||
-      headersText !== serializeKeyValueText(server.entry.headers, ':')
+      headersText !== serializeKeyValueText(server.entry.headers, ':') ||
+      timeoutStr !== (server.entry.startup_timeout_sec != null ? String(server.entry.startup_timeout_sec) : server.entry.timeout != null ? String(server.entry.timeout) : '') ||
+      toolTimeoutStr !== (server.entry.tool_timeout_sec != null ? String(server.entry.tool_timeout_sec) : '') ||
+      sessionId !== (server.entry.sessionId ?? '')
 
     if (configChanged) {
       setTestResult(null)
     }
-  }, [transportType, command, url, argsText, envText, headersText, server])
+  }, [transportType, command, url, argsText, envText, headersText, timeoutStr, toolTimeoutStr, sessionId, server])
 
   /** 构建 McpServerEntry */
   const buildEntry = (includeTestResult = false): McpServerEntry => {
@@ -197,8 +221,10 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
         argsText,
         envText,
         timeoutStr,
+        toolTimeoutStr,
         url,
         headersText,
+        sessionId,
       },
       includeTestResult,
     )
@@ -273,6 +299,8 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
     envText,
     headersText,
     timeoutStr,
+    toolTimeoutStr,
+    sessionId,
     enabled,
     testResult,
   ])
@@ -298,7 +326,7 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
     const serverName = name.trim()
     if (!serverName) return
 
-    // stdio 需要 command，http/sse 需要 url
+    // stdio 需要 command，远程 MCP 需要 url
     if (transportType === 'stdio' && !command.trim()) return
     if (transportType !== 'stdio' && !url.trim()) return
 
@@ -332,7 +360,7 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
     const serverName = name.trim()
     if (!serverName) return
 
-    // stdio 需要 command，http/sse 需要 url
+    // stdio 需要 command，远程 MCP 需要 url
     if (transportType === 'stdio' && !command.trim()) return
     if (transportType !== 'stdio' && !url.trim()) return
 
@@ -484,33 +512,68 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
                 placeholder="30"
                 type="number"
               />
+              <SettingsInput
+                label="工具超时（秒）"
+                description="单次 MCP 工具调用的最大等待时间，默认 60 秒"
+                value={toolTimeoutStr}
+                onChange={setToolTimeoutStr}
+                placeholder="60"
+                type="number"
+              />
             </>
           )}
 
-          {/* http/sse 专用字段 */}
+          {/* 远程 MCP 专用字段 */}
           {transportType !== 'stdio' && (
             <>
               <SettingsInput
                 label="URL"
                 value={url}
                 onChange={setUrl}
-                placeholder="例如: http://localhost:3000/mcp"
+                placeholder={transportType === 'websocket' ? '例如: ws://localhost:3000/mcp' : '例如: http://localhost:3000/mcp'}
                 required
               />
-              {/* 请求头多行输入 */}
-              <div className="px-4 py-3 space-y-2">
-                <div>
-                  <div className="text-sm font-medium text-foreground">请求头</div>
-                  <div className="text-xs text-muted-foreground mt-0.5">每行一个，格式: Key: Value</div>
-                </div>
-                <textarea
-                  value={headersText}
-                  onChange={(e) => setHeadersText(e.target.value)}
-                  placeholder="Authorization: Bearer xxx&#10;X-Custom-Header: value"
-                  rows={3}
-                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-y font-mono"
+              <SettingsInput
+                label="启动超时（秒）"
+                description="连接远程 MCP 并读取工具列表的最大等待时间，默认 30 秒"
+                value={timeoutStr}
+                onChange={setTimeoutStr}
+                placeholder="30"
+                type="number"
+              />
+              <SettingsInput
+                label="工具超时（秒）"
+                description="单次 MCP 工具调用的最大等待时间，默认 60 秒"
+                value={toolTimeoutStr}
+                onChange={setToolTimeoutStr}
+                placeholder="60"
+                type="number"
+              />
+              {transportType === 'http' && (
+                <SettingsInput
+                  label="会话 ID"
+                  description="可选，仅用于需要固定 Streamable HTTP session 的服务"
+                  value={sessionId}
+                  onChange={setSessionId}
+                  placeholder="留空自动协商"
                 />
-              </div>
+              )}
+              {/* 请求头多行输入 */}
+              {transportType !== 'websocket' && (
+                <div className="px-4 py-3 space-y-2">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">请求头</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">每行一个，格式: Key: Value</div>
+                  </div>
+                  <textarea
+                    value={headersText}
+                    onChange={(e) => setHeadersText(e.target.value)}
+                    placeholder="Authorization: Bearer xxx&#10;X-Custom-Header: value"
+                    rows={3}
+                    className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-y font-mono"
+                  />
+                </div>
+              )}
             </>
           )}
 
@@ -520,7 +583,7 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
               <div>
                 <div className="text-sm font-medium text-foreground">连接测试</div>
                 <div className="text-xs text-muted-foreground mt-0.5">
-                  可选的诊断工具；测试结果不会影响 MCP 是否启用
+                  会真实连接 MCP 服务并读取工具列表；测试结果不会影响 MCP 是否启用
                 </div>
               </div>
               <Button

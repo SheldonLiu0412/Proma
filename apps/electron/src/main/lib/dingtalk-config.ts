@@ -129,9 +129,9 @@ export function saveDingTalkBotConfig(input: DingTalkBotConfigInput): DingTalkBo
       enabled: input.enabled,
       clientId: input.clientId.trim(),
       clientSecret: input.clientSecret ? encryptSecret(input.clientSecret) : existing.clientSecret,
-      defaultWorkspaceId: input.defaultWorkspaceId,
-      defaultChannelId: input.defaultChannelId,
-      defaultModelId: input.defaultModelId,
+      defaultWorkspaceId: input.defaultWorkspaceId ?? existing.defaultWorkspaceId,
+      defaultChannelId: input.defaultChannelId ?? existing.defaultChannelId,
+      defaultModelId: input.defaultModelId ?? existing.defaultModelId,
     }
     config.bots[idx] = updated
     writeMultiConfig(config)

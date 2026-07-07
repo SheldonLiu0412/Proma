@@ -39,6 +39,7 @@ import type {
   Skill,
   ToolDefinition,
 } from '@earendil-works/pi-coding-agent'
+import type { Transport as PiAgentTransport } from '@earendil-works/pi-ai'
 import type { AgentMessage, AgentToolResult, AgentToolUpdateCallback, ThinkingLevel } from '@earendil-works/pi-agent-core'
 import type {
   Api,
@@ -103,6 +104,12 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   /** 当前用户输入显式引用的 Skill name（兼容历史 slug 已在编排层归一化） */
   skillMentions?: string[]
   proxyUrl?: string
+  /** Pi 模型请求传输策略：auto / sse / websocket / websocket-cached */
+  transport?: PiAgentTransport
+  /** HTTP 头/响应体空闲超时，单位毫秒；0 表示交给 Pi SDK 禁用超时 */
+  httpIdleTimeoutMs?: number
+  /** WebSocket 建连超时，单位毫秒；0 表示交给 Pi SDK 禁用超时 */
+  websocketConnectTimeoutMs?: number
   runtimeEnv?: AgentRuntimeEnv
   /** 子代理（Agent 工具）委派时使用的模型；DeepSeek 主模型下降级到 deepseek-v4-flash，缺省继承主模型 */
   subagentModel?: string
@@ -153,11 +160,150 @@ interface PiModelDefaults {
   maxTokens: number
 }
 
+export interface PiRemoteConnectionSettings {
+  httpProxy?: string
+  transport?: PiAgentTransport
+  httpIdleTimeoutMs?: number
+  websocketConnectTimeoutMs?: number
+}
+
+interface PiProxySettingsModule {
+  applyHttpProxySettings?: (httpProxy: string | undefined) => void
+}
+
+interface ScopedProxyEnvEntry {
+  id: symbol
+  proxyUrl: string
+}
+
 interface AsyncQueue<T> {
   push: (value: T) => void
   fail: (error: unknown) => void
   close: () => void
   next: () => Promise<IteratorResult<T>>
+}
+
+const PI_PROXY_ENV_KEYS = [
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+] as const
+
+const scopedProxyEnvStack: ScopedProxyEnvEntry[] = []
+let scopedProxyEnvOriginal: Map<string, string | undefined> | undefined
+
+function getCaseInsensitiveRuntimeEnvValue(env: Record<string, string> | undefined, key: string): string | undefined {
+  if (!env) return undefined
+  const exact = env[key]
+  if (exact) return exact
+  const foundKey = Object.keys(env).find((name) => name.toLowerCase() === key.toLowerCase())
+  const value = foundKey ? env[foundKey] : undefined
+  return value || undefined
+}
+
+function normalizeProxyUrl(proxyUrl: string | undefined): string | undefined {
+  const trimmed = proxyUrl?.trim()
+  return trimmed ? trimmed : undefined
+}
+
+function resolvePiHttpProxy(input: Pick<PiAgentQueryOptions, 'proxyUrl' | 'runtimeEnv'>): string | undefined {
+  return normalizeProxyUrl(input.proxyUrl)
+    ?? normalizeProxyUrl(getCaseInsensitiveRuntimeEnvValue(input.runtimeEnv?.env, 'HTTPS_PROXY'))
+    ?? normalizeProxyUrl(getCaseInsensitiveRuntimeEnvValue(input.runtimeEnv?.env, 'HTTP_PROXY'))
+    ?? normalizeProxyUrl(getCaseInsensitiveRuntimeEnvValue(input.runtimeEnv?.env, 'ALL_PROXY'))
+}
+
+function isNonNegativeFiniteNumber(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value >= 0
+}
+
+export function buildPiRemoteConnectionSettings(
+  input: Pick<
+    PiAgentQueryOptions,
+    'proxyUrl' | 'runtimeEnv' | 'transport' | 'httpIdleTimeoutMs' | 'websocketConnectTimeoutMs'
+  >,
+): PiRemoteConnectionSettings {
+  const httpProxy = resolvePiHttpProxy(input)
+  return {
+    ...(httpProxy ? { httpProxy } : {}),
+    ...(input.transport ? { transport: input.transport } : {}),
+    ...(isNonNegativeFiniteNumber(input.httpIdleTimeoutMs) ? { httpIdleTimeoutMs: input.httpIdleTimeoutMs } : {}),
+    ...(isNonNegativeFiniteNumber(input.websocketConnectTimeoutMs)
+      ? { websocketConnectTimeoutMs: input.websocketConnectTimeoutMs }
+      : {}),
+  }
+}
+
+function setScopedProxyEnv(proxyUrl: string): void {
+  for (const key of PI_PROXY_ENV_KEYS) {
+    process.env[key] = proxyUrl
+  }
+}
+
+function restoreOriginalProxyEnv(): void {
+  if (!scopedProxyEnvOriginal) return
+  for (const key of PI_PROXY_ENV_KEYS) {
+    const originalValue = scopedProxyEnvOriginal.get(key)
+    if (originalValue === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = originalValue
+    }
+  }
+  scopedProxyEnvOriginal = undefined
+}
+
+function enterScopedProxyEnv(proxyUrl: string): () => void {
+  if (!scopedProxyEnvOriginal) {
+    scopedProxyEnvOriginal = new Map(PI_PROXY_ENV_KEYS.map((key) => [key, process.env[key]]))
+  }
+
+  const entry: ScopedProxyEnvEntry = { id: Symbol('pi-proxy-env'), proxyUrl }
+  scopedProxyEnvStack.push(entry)
+  setScopedProxyEnv(proxyUrl)
+
+  let restored = false
+  return () => {
+    if (restored) return
+    restored = true
+    const index = scopedProxyEnvStack.findIndex((item) => item.id === entry.id)
+    if (index >= 0) scopedProxyEnvStack.splice(index, 1)
+
+    const current = scopedProxyEnvStack.at(-1)
+    if (current) {
+      setScopedProxyEnv(current.proxyUrl)
+    } else {
+      restoreOriginalProxyEnv()
+    }
+  }
+}
+
+function getApplyHttpProxySettings(sdk: unknown): PiProxySettingsModule['applyHttpProxySettings'] {
+  if (!sdk || typeof sdk !== 'object') return undefined
+  const candidate = (sdk as { applyHttpProxySettings?: unknown }).applyHttpProxySettings
+  return typeof candidate === 'function'
+    ? (candidate as PiProxySettingsModule['applyHttpProxySettings'])
+    : undefined
+}
+
+export function applyPiProxySettingsForQuery(
+  sdk: unknown,
+  input: Pick<PiAgentQueryOptions, 'proxyUrl' | 'runtimeEnv'>,
+): () => void {
+  const proxyUrl = resolvePiHttpProxy(input)
+  if (!proxyUrl) return () => {}
+
+  const restoreProxyEnv = enterScopedProxyEnv(proxyUrl)
+  try {
+    getApplyHttpProxySettings(sdk)?.(proxyUrl)
+  } catch (error) {
+    console.warn('[Pi SDK] 应用 Pi proxy helper 失败，已回退到 scoped proxy env:', error)
+  }
+  setScopedProxyEnv(proxyUrl)
+  return restoreProxyEnv
 }
 
 function createAsyncQueue<T>(): AsyncQueue<T> {
@@ -1673,22 +1819,29 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     const runtimeGuard = createAgentRuntimeGuard(input)
     active.runtimeGuard = runtimeGuard
     let unsubscribe: (() => void) | undefined
+    let restorePiProxyEnv: (() => void) | undefined
 
     const cleanupActiveSession = (): void => {
-      unsubscribe?.()
-      unsubscribe = undefined
-      if (!active.disposed) {
-        active.disposed = true
-        rejectPendingInterruptPrompts(active, createAbortError())
-        active.session?.dispose()
-      }
-      if (this.activeSessions.get(input.sessionId) === active) {
-        this.activeSessions.delete(input.sessionId)
+      try {
+        unsubscribe?.()
+        unsubscribe = undefined
+        if (!active.disposed) {
+          active.disposed = true
+          rejectPendingInterruptPrompts(active, createAbortError())
+          active.session?.dispose()
+        }
+        if (this.activeSessions.get(input.sessionId) === active) {
+          this.activeSessions.delete(input.sessionId)
+        }
+      } finally {
+        restorePiProxyEnv?.()
+        restorePiProxyEnv = undefined
       }
     }
 
     try {
       const sdk = await import('@earendil-works/pi-coding-agent')
+      restorePiProxyEnv = applyPiProxySettingsForQuery(sdk, input)
       if (active.abortRequested) throw createAbortError()
 
       if (!existsSync(input.piSessionDir)) mkdirSync(input.piSessionDir, { recursive: true })
@@ -1722,17 +1875,17 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               createSkillsOverride: createPromaSkillsOverride,
               preparePromptWithSkills: preparePromptWithPromaSkills,
               thinkingLevel: thinkingLevelFromOptions(input.thinking, input.effort),
+              buildRemoteConnectionSettings: buildPiRemoteConnectionSettings,
               runtimeGuard,
               installRuntimeGuardHooks,
             })]
           : []),
       ]
 
-      const proxyUrl = input.proxyUrl?.trim()
       const settingsManager = sdk.SettingsManager.inMemory({
         compaction: { enabled: false },
         retry: { enabled: false },
-        ...(proxyUrl ? { httpProxy: proxyUrl } : {}),
+        ...buildPiRemoteConnectionSettings(input),
       })
       const resourceLoader = new sdk.DefaultResourceLoader({
         cwd,

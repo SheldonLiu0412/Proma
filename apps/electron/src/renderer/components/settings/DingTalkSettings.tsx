@@ -258,6 +258,9 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
         enabled: true,
         clientId: clientId.trim(),
         clientSecret: clientSecret || '',
+        defaultWorkspaceId: bot.defaultWorkspaceId,
+        defaultChannelId: bot.defaultChannelId,
+        defaultModelId: bot.defaultModelId,
       })
       toast.success(`Bot "${name}" 已保存`)
       onSaved()

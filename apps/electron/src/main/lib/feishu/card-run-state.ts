@@ -36,6 +36,12 @@ export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_time
 
 export interface RunState {
   blocks: Block[]
+  /** assistant uuid → text block 下标，用于 Pi partial 快照 upsert。 */
+  assistantTextBlockIndexes?: Record<string, number>
+  /** 缺少 uuid 的 partial 只能按最近匿名 partial 快照兜底替换。 */
+  anonymousPartialTextBlockIndex?: number
+  /** 已展示的 tool_use，避免 partial 快照重复插入工具块。 */
+  seenToolUseKeys?: Record<string, true>
   reasoning: { content: string; active: boolean }
   footer: FooterStatus
   terminal: Terminal
@@ -56,6 +62,8 @@ export interface RunState {
 export function createInitialState(): RunState {
   return {
     blocks: [],
+    assistantTextBlockIndexes: {},
+    seenToolUseKeys: {},
     reasoning: { content: '', active: false },
     footer: 'thinking',
     terminal: 'running',
@@ -70,20 +78,80 @@ function closeStreamingText(blocks: Block[]): Block[] {
   )
 }
 
-function appendText(state: RunState, delta: string): RunState {
-  const last = state.blocks[state.blocks.length - 1]
-  if (last && last.kind === 'text' && last.streaming) {
-    const next: Block = { ...last, content: last.content + delta }
+function upsertTextSnapshot(
+  state: RunState,
+  text: string,
+  uuid: string | undefined,
+  isPartial: boolean,
+): RunState {
+  if (uuid) {
+    const assistantTextBlockIndexes = state.assistantTextBlockIndexes ?? {}
+    const existingIndex = assistantTextBlockIndexes[uuid]
+    if (typeof existingIndex === 'number') {
+      const existing = state.blocks[existingIndex]
+      if (existing && existing.kind === 'text') {
+        const blocks = [...state.blocks]
+        blocks[existingIndex] = { kind: 'text', content: text, streaming: isPartial }
+        return {
+          ...state,
+          blocks,
+          reasoning: { ...state.reasoning, active: false },
+          footer: 'streaming',
+        }
+      }
+    }
+
+    const blocks = [...closeStreamingText(state.blocks), { kind: 'text' as const, content: text, streaming: true }]
     return {
       ...state,
-      blocks: [...state.blocks.slice(0, -1), next],
+      blocks,
+      assistantTextBlockIndexes: { ...assistantTextBlockIndexes, [uuid]: blocks.length - 1 },
       reasoning: { ...state.reasoning, active: false },
       footer: 'streaming',
     }
   }
+
+  if (isPartial) {
+    const existingIndex = state.anonymousPartialTextBlockIndex
+    if (typeof existingIndex === 'number') {
+      const existing = state.blocks[existingIndex]
+      if (existing && existing.kind === 'text') {
+        const blocks = [...state.blocks]
+        blocks[existingIndex] = { kind: 'text', content: text, streaming: true }
+        return {
+          ...state,
+          blocks,
+          reasoning: { ...state.reasoning, active: false },
+          footer: 'streaming',
+        }
+      }
+    }
+
+    const blocks = [...closeStreamingText(state.blocks), { kind: 'text' as const, content: text, streaming: true }]
+    return {
+      ...state,
+      blocks,
+      anonymousPartialTextBlockIndex: blocks.length - 1,
+      reasoning: { ...state.reasoning, active: false },
+      footer: 'streaming',
+    }
+  }
+
+  if (state.anonymousPartialTextBlockIndex !== undefined) {
+    const blocks = [...state.blocks]
+    blocks[state.anonymousPartialTextBlockIndex] = { kind: 'text', content: text, streaming: false }
+    return {
+      ...state,
+      blocks,
+      anonymousPartialTextBlockIndex: undefined,
+      reasoning: { ...state.reasoning, active: false },
+      footer: 'streaming',
+    }
+  }
+
   return {
     ...state,
-    blocks: [...state.blocks, { kind: 'text', content: delta, streaming: true }],
+    blocks: [...closeStreamingText(state.blocks), { kind: 'text', content: text, streaming: true }],
     reasoning: { ...state.reasoning, active: false },
     footer: 'streaming',
   }
@@ -105,6 +173,12 @@ function startTool(state: RunState, id: string, name: string, input: unknown): R
     reasoning: { ...state.reasoning, active: false },
     footer: 'tool_running',
   }
+}
+
+function markToolSeen(state: RunState, key: string): RunState {
+  const seenToolUseKeys = state.seenToolUseKeys ?? {}
+  if (seenToolUseKeys[key]) return state
+  return { ...state, seenToolUseKeys: { ...seenToolUseKeys, [key]: true } }
 }
 
 function completeTool(state: RunState, id: string, output: string, isError: boolean): RunState {
@@ -157,13 +231,18 @@ export function reduce(state: RunState, payload: AgentStreamPayload): RunState {
       if (am.error?.message) {
         return markError(state, am.error.message)
       }
-      for (const block of am.message?.content ?? []) {
-        if (block.type === 'text') {
-          const text = (block as { text?: unknown }).text
-          if (typeof text === 'string' && text) {
-            next = appendText(next, text)
-          }
-        } else if (block.type === 'thinking') {
+      const meta = am as SDKAssistantMessage & { _partial?: boolean }
+      const messageUuid = typeof meta.uuid === 'string' && meta.uuid.length > 0 ? meta.uuid : undefined
+      const isPartial = meta._partial === true
+      const assistantText = am.message?.content
+        ?.map((block) => block.type === 'text' && typeof block.text === 'string' ? block.text : '')
+        .join('') ?? ''
+      if (assistantText) {
+        next = upsertTextSnapshot(next, assistantText, messageUuid, isPartial)
+      }
+
+      for (const [index, block] of (am.message?.content ?? []).entries()) {
+        if (block.type === 'thinking') {
           const thinking = (block as { thinking?: unknown }).thinking
           if (typeof thinking === 'string' && thinking) {
             next = appendThinking(next, thinking)
@@ -171,6 +250,9 @@ export function reduce(state: RunState, payload: AgentStreamPayload): RunState {
         } else if (block.type === 'tool_use') {
           const tb = block as { id?: unknown; name?: unknown; input?: unknown }
           if (typeof tb.id === 'string' && typeof tb.name === 'string') {
+            const toolKey = `${messageUuid ?? (isPartial ? 'anonymous-partial' : 'anonymous-final')}:${tb.id || `${tb.name}:${index}`}`
+            if (next.seenToolUseKeys?.[toolKey]) continue
+            next = markToolSeen(next, toolKey)
             next = startTool(next, tb.id, tb.name, tb.input)
           }
         }

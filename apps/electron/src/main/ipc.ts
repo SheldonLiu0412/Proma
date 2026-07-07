@@ -2019,8 +2019,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.TEST_MCP_SERVER,
     async (_, name: string, entry: import('@proma/shared').McpServerEntry): Promise<{ success: boolean; message: string }> => {
-      const { validateMcpServer } = await import('./lib/mcp-validator')
-      const result = await validateMcpServer(name, entry)
+      const [{ validateMcpServer }, { getEffectiveProxyUrl }, { getFetchFn }] = await Promise.all([
+        import('./lib/mcp-validator'),
+        import('./lib/proxy-settings-service'),
+        import('./lib/proxy-fetch'),
+      ])
+      const proxyUrl = await getEffectiveProxyUrl()
+      const result = await validateMcpServer(name, entry, { fetchFn: getFetchFn(proxyUrl) })
       return {
         success: result.valid,
         message: result.valid ? '连接成功' : (result.reason || '连接失败'),

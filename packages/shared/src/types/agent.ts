@@ -732,18 +732,33 @@ export interface AgentGenerateTitleInput {
 
 // ===== MCP 服务器配置 =====
 
-/** MCP 传输类型；Proma 将 Streamable HTTP 规范化存储为 http */
-export type McpTransportType = 'stdio' | 'http' | 'sse'
+/** MCP 传输类型；Proma 将 Streamable HTTP 规范化存储为 http，将 ws/wss 规范化存储为 websocket */
+export type McpTransportType = 'stdio' | 'http' | 'sse' | 'websocket'
 
-/** 外部配置中常见的 Streamable HTTP 别名 */
-export type McpTransportTypeAlias = 'streamableHttp' | 'streamable-http' | 'streamable_http'
+/** 外部配置中常见的传输类型别名 */
+export type McpTransportTypeAlias =
+  | 'streamableHttp'
+  | 'streamable-http'
+  | 'streamable_http'
+  | 'ws'
+  | 'wss'
 
 /** MCP 传输类型输入；保存和运行前会规范化为 McpTransportType */
 export type McpTransportTypeInput = McpTransportType | McpTransportTypeAlias
 
+/** Streamable HTTP 重连配置 */
+export interface McpReconnectionOptions {
+  maxReconnectionDelay?: number
+  initialReconnectionDelay?: number
+  reconnectionDelayGrowFactor?: number
+  maxRetries?: number
+}
+
 /** MCP 服务器条目 */
 export interface McpServerEntry {
   type: McpTransportType
+  /** 旧版/common 配置可能使用 transport；保存前会迁移到 type */
+  transport?: McpTransportTypeInput
   /** stdio: 可执行命令 */
   command?: string
   /** stdio: 命令参数 */
@@ -752,14 +767,26 @@ export interface McpServerEntry {
   env?: Record<string, string>
   /** stdio: 工作目录 */
   cwd?: string
-  /** http/sse: 服务端 URL */
+  /** http/sse/websocket: 服务端 URL */
   url?: string
   /** http/sse: 请求头 */
   headers?: Record<string, string>
-  /** 启动超时（秒），仅 stdio 类型有效，默认 30 */
+  /** 启动超时（秒），默认 30；兼容旧 UI 字段 */
   timeout?: number
+  /** 启动/连接与 listTools 超时（秒），优先级高于 timeout */
+  startup_timeout_sec?: number
+  /** 工具调用超时（秒），默认 60 */
+  tool_timeout_sec?: number
+  /** Streamable HTTP 会话 ID */
+  sessionId?: string
+  /** Streamable HTTP 重连配置 */
+  reconnectionOptions?: McpReconnectionOptions
+  /** 远程 MCP 认证配置占位；当前桥接只消费 headers，保留该字段避免配置丢失 */
+  auth?: Record<string, unknown>
   /** 是否启用 */
   enabled: boolean
+  /** 旧版/common 配置可能使用 disabled；保存前会迁移到 enabled */
+  disabled?: boolean
   /** 是否为内置 MCP（不可删除，仅可配置 env） */
   isBuiltin?: boolean
   /** 最后一次测试结果 */
