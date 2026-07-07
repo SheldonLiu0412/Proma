@@ -8,7 +8,7 @@
  */
 
 import { BrowserWindow } from 'electron'
-import type { AgentStreamPayload } from '@proma/shared'
+import type { AgentStreamPayload, SDKAssistantMessage } from '@proma/shared'
 import { AGENT_IPC_CHANNELS } from '@proma/shared'
 import { createAgentSession, listAgentSessions, getAgentSessionMeta } from './agent-session-manager'
 import {
@@ -56,6 +56,10 @@ export interface BridgeCommandHandlerConfig {
   adapter: BridgePlatformAdapter
   /** 获取默认工作区 ID */
   getDefaultWorkspaceId?: () => string | undefined
+  /** 获取平台/Bot 默认渠道 ID */
+  getDefaultChannelId?: () => string | undefined
+  /** 获取平台/Bot 默认模型 ID */
+  getDefaultModelId?: () => string | undefined
   /** 工作区切换后的回调 */
   onWorkspaceSwitched?: (workspaceId: string) => void
   /** 可选持久化存储：用于跨应用重启恢复 chatId → sessionId 绑定 */
@@ -74,22 +78,12 @@ export interface BridgeChatBinding {
 /** Agent 回复缓冲 */
 interface SessionBuffer {
   text: string
+  assistantTextParts: string[]
+  assistantTextIndexByUuid: Map<string, number>
+  anonymousPartialIndex?: number
   chatId: string
   contextData: unknown
   startedAt: number
-}
-
-/** Agent SDK 消息中的内容块 */
-interface ContentBlock {
-  type: string
-  text?: string
-}
-
-/** Agent SDK assistant 消息结构 */
-interface AssistantMessagePayload {
-  message?: {
-    content?: ContentBlock[]
-  }
 }
 
 // ===== 命令处理器实现 =====
@@ -139,16 +133,17 @@ export class BridgeCommandHandler {
     const existing = this.chatBindings.get(chatId)
     if (existing) return existing
 
-    const settings = getSettings()
-    const channelId = settings.agentChannelId
+    const channelId = this.resolveDefaultChannelId()
     if (!channelId) return null
 
+    const settings = getSettings()
     const workspaceId = this.config.getDefaultWorkspaceId?.() ?? settings.agentWorkspaceId ?? ''
 
     const session = createAgentSession(
       `${this.config.platformName}会话`,
       channelId,
       workspaceId || undefined,
+      this.resolveDefaultModelId(),
     )
 
     const binding: BridgeChatBinding = {
@@ -156,7 +151,7 @@ export class BridgeCommandHandler {
       sessionId: session.id,
       workspaceId,
       channelId,
-      modelId: settings.agentModelId ?? undefined,
+      modelId: this.resolveDefaultModelId(),
     }
     this.chatBindings.set(chatId, binding)
     this.sessionToChat.set(session.id, chatId)
@@ -183,6 +178,7 @@ export class BridgeCommandHandler {
 
   /** 取消订阅（Bridge 断开时调用） */
   unsubscribe(): void {
+    this.stopActiveBoundSessions('Bridge 取消订阅')
     this.eventBusUnsubscribe?.()
     this.eventBusUnsubscribe = null
     this.sessionBuffers.clear()
@@ -195,6 +191,7 @@ export class BridgeCommandHandler {
 
   /** 清理所有状态 */
   clear(): void {
+    this.stopActiveBoundSessions('Bridge 清理状态')
     this.chatBindings.clear()
     this.sessionToChat.clear()
     this.sessionBuffers.clear()
@@ -297,20 +294,21 @@ export class BridgeCommandHandler {
   }
 
   private async createNewSession(chatId: string, title?: string, contextData?: unknown): Promise<void> {
-    const settings = getSettings()
-    const channelId = settings.agentChannelId
+    const channelId = this.resolveDefaultChannelId()
     if (!channelId) {
       await this.send(chatId, '请先在 Proma 设置中选择 Agent 渠道。', contextData)
       return
     }
 
     // 确定工作区
+    const settings = getSettings()
     const workspaceId = this.config.getDefaultWorkspaceId?.() ?? settings.agentWorkspaceId ?? ''
 
     const session = createAgentSession(
       title || '新会话',
       channelId,
       workspaceId || undefined,
+      this.resolveDefaultModelId(),
     )
 
     // 清理旧绑定
@@ -324,7 +322,7 @@ export class BridgeCommandHandler {
       sessionId: session.id,
       workspaceId,
       channelId,
-      modelId: settings.agentModelId ?? undefined,
+      modelId: this.resolveDefaultModelId(),
     }
     this.chatBindings.set(chatId, binding)
     this.sessionToChat.set(session.id, chatId)
@@ -399,8 +397,6 @@ export class BridgeCommandHandler {
 
   private async handleSwitchCommand(chatId: string, arg: string, contextData?: unknown): Promise<void> {
     const sessions = listAgentSessions()
-    const settings = getSettings()
-
     // 支持序号和 ID 前缀两种匹配
     const index = Number(arg)
     const match = Number.isInteger(index) && index >= 1 && index <= sessions.length
@@ -421,9 +417,9 @@ export class BridgeCommandHandler {
     const binding: BridgeChatBinding = {
       chatId,
       sessionId: match.id,
-      workspaceId: match.workspaceId ?? this.config.getDefaultWorkspaceId?.() ?? settings.agentWorkspaceId ?? '',
-      channelId: match.channelId ?? settings.agentChannelId ?? '',
-      modelId: settings.agentModelId ?? undefined,
+      workspaceId: match.workspaceId ?? this.resolveDefaultWorkspaceId(),
+      channelId: match.channelId ?? this.resolveDefaultChannelId() ?? '',
+      modelId: match.modelId ?? this.resolveDefaultModelId(),
     }
     this.chatBindings.set(chatId, binding)
     this.sessionToChat.set(match.id, chatId)
@@ -509,10 +505,9 @@ export class BridgeCommandHandler {
     if (binding) {
       const session = getAgentSessionMeta(binding.sessionId)
       lines.push(`会话: ${session?.title ?? '未知'} (${binding.sessionId.slice(0, 8)})`)
-      // 与发送路径同序解析：binding > 应用设置
-      const nowSettings = getSettings()
-      const effChannelId = binding.channelId || nowSettings.agentChannelId
-      const effModelId = binding.modelId ?? nowSettings.agentModelId
+      // 与发送路径同序解析：binding/session > Bot 默认 > 应用设置
+      const effChannelId = binding.channelId || session?.channelId || this.resolveDefaultChannelId()
+      const effModelId = binding.modelId ?? session?.modelId ?? this.resolveDefaultModelId()
       const modelInfo = describeBindingModel(effChannelId, effModelId)
       lines.push(`模型: ${modelInfo.channelName} / ${modelInfo.modelName}${modelInfo.valid ? '' : '（已失效）'}`)
     } else {
@@ -681,8 +676,7 @@ export class BridgeCommandHandler {
     contextData?: unknown,
     attachments?: BridgeAttachment[],
   ): Promise<void> {
-    const settings = getSettings()
-    const channelId = settings.agentChannelId
+    const channelId = this.resolveDefaultChannelId()
     if (!channelId) {
       await this.send(chatId, '请先在 Proma 设置中选择 Agent 渠道。', contextData)
       return
@@ -716,15 +710,17 @@ export class BridgeCommandHandler {
     // 初始化回复缓冲
     this.sessionBuffers.set(binding.sessionId, {
       text: '',
+      assistantTextParts: [],
+      assistantTextIndexByUuid: new Map(),
       chatId,
       contextData,
       startedAt: Date.now(),
     })
 
-    // 渠道/模型解析：binding（per-chat 用户在 IM 里切过的）优先，其次全局设置
-    const latestSettings = getSettings()
-    const latestChannelId = binding.channelId || latestSettings.agentChannelId || ''
-    const modelId = binding.modelId ?? latestSettings.agentModelId
+    // 渠道/模型解析：binding/session 明确值优先，其次 Bot 默认，最后应用设置
+    const sessionMeta = getAgentSessionMeta(binding.sessionId)
+    const latestChannelId = binding.channelId || sessionMeta?.channelId || this.resolveDefaultChannelId() || ''
+    const modelId = binding.modelId ?? sessionMeta?.modelId ?? this.resolveDefaultModelId()
 
     // 如果有附件，拼接 <attached_files> 块到用户消息前
     const fileReferences = attachments?.length
@@ -768,12 +764,7 @@ export class BridgeCommandHandler {
 
       // 从 assistant 消息中提取文本
       if (msg.type === 'assistant') {
-        const aMsg = msg as AssistantMessagePayload
-        for (const block of aMsg.message?.content ?? []) {
-          if (block.type === 'text' && block.text) {
-            buffer.text += block.text
-          }
-        }
+        this.upsertAssistantText(buffer, msg as SDKAssistantMessage)
       }
 
       // result → 会话完成
@@ -799,6 +790,74 @@ export class BridgeCommandHandler {
 
   private async send(chatId: string, text: string, contextData?: unknown): Promise<void> {
     await this.config.adapter.sendText(chatId, text, contextData)
+  }
+
+  private resolveDefaultWorkspaceId(): string {
+    const settings = getSettings()
+    return this.config.getDefaultWorkspaceId?.() ?? settings.agentWorkspaceId ?? ''
+  }
+
+  private resolveDefaultChannelId(): string | undefined {
+    const settings = getSettings()
+    return this.config.getDefaultChannelId?.() ?? settings.agentChannelId ?? undefined
+  }
+
+  private resolveDefaultModelId(): string | undefined {
+    const settings = getSettings()
+    return this.config.getDefaultModelId?.() ?? settings.agentModelId ?? undefined
+  }
+
+  private upsertAssistantText(buffer: SessionBuffer, message: SDKAssistantMessage): void {
+    const text = message.message?.content
+      ?.map((block) => block.type === 'text' && typeof block.text === 'string' ? block.text : '')
+      .join('') ?? ''
+    if (!text) return
+
+    const meta = message as SDKAssistantMessage & { _partial?: boolean }
+    const isPartial = meta._partial === true
+    const uuid = typeof meta.uuid === 'string' && meta.uuid.length > 0 ? meta.uuid : undefined
+
+    if (uuid) {
+      const existingIndex = buffer.assistantTextIndexByUuid.get(uuid)
+      if (existingIndex === undefined) {
+        buffer.assistantTextIndexByUuid.set(uuid, buffer.assistantTextParts.length)
+        buffer.assistantTextParts.push(text)
+      } else {
+        buffer.assistantTextParts[existingIndex] = text
+      }
+      buffer.text = buffer.assistantTextParts.join('')
+      return
+    }
+
+    // 兼容缺少 uuid 的 partial：只能把最近一个匿名 partial 视为同一条快照。
+    if (isPartial) {
+      if (buffer.anonymousPartialIndex === undefined) {
+        buffer.anonymousPartialIndex = buffer.assistantTextParts.length
+        buffer.assistantTextParts.push(text)
+      } else {
+        buffer.assistantTextParts[buffer.anonymousPartialIndex] = text
+      }
+    } else if (buffer.anonymousPartialIndex !== undefined) {
+      buffer.assistantTextParts[buffer.anonymousPartialIndex] = text
+      buffer.anonymousPartialIndex = undefined
+    } else {
+      buffer.assistantTextParts.push(text)
+    }
+
+    buffer.text = buffer.assistantTextParts.join('')
+  }
+
+  private stopActiveBoundSessions(reason: string): void {
+    const sessionIds = new Set<string>(this.sessionBuffers.keys())
+    for (const binding of this.chatBindings.values()) {
+      sessionIds.add(binding.sessionId)
+    }
+
+    for (const sessionId of sessionIds) {
+      if (!isAgentSessionActive(sessionId)) continue
+      this.log(`${reason}，停止仍在运行的 Agent: ${sessionId.slice(0, 8)}`)
+      stopAgent(sessionId)
+    }
   }
 
   private notifySessionCreated(sessionId: string, title: string): void {

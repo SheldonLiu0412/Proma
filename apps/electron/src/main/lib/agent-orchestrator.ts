@@ -54,9 +54,10 @@ import { validateToolInput } from './agent-tool-input-validator'
 import { estimateTokenCount, WRITE_CONTENT_TOKEN_THRESHOLD } from './agent-tool-token-estimator'
 import { buildBuiltinAgentTools } from './builtin-mcp/registry'
 import { getBuiltinMcpDefinitions } from './builtin-mcp/baseline'
-import { buildMcpBridgeTools, type PromaMcpServerConfig } from './mcp-pi-bridge'
+import { buildMcpBridgeTools, type McpBridgeBuildResult, type PromaMcpServerConfig } from './mcp-pi-bridge'
 import { createAgentSidecarSnapshot, restoreAgentSidecarSnapshot, type AgentSidecarSnapshotRootInput, type AgentSidecarRestoreOptions, type AgentSidecarRestoreResult } from './agent-sidecar-snapshot'
 import { buildAgentRuntimeEnv } from './agent-runtime-env'
+import type { AgentTransportMode, AppSettings } from '../../types'
 
 // ===== 类型定义 =====
 
@@ -142,10 +143,44 @@ const AUTO_RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set([
   'network_error',
 ])
 const SKILL_COMMAND_PATTERN = /\/skill:([A-Za-z0-9][A-Za-z0-9._-]*)/g
+const PI_AGENT_TRANSPORT_MODES: ReadonlySet<AgentTransportMode> = new Set([
+  'sse',
+  'websocket',
+  'websocket-cached',
+  'auto',
+])
+
+interface McpStartupAbortState {
+  runToken: symbol
+  controller: AbortController
+}
 
 /** 判断 typed_error 事件是否可自动重试 */
 function isAutoRetryableTypedError(error: TypedError): boolean {
   return AUTO_RETRYABLE_ERROR_CODES.has(error.code)
+}
+
+function normalizeAgentTransportMode(value: unknown): AgentTransportMode | undefined {
+  return typeof value === 'string' && PI_AGENT_TRANSPORT_MODES.has(value as AgentTransportMode)
+    ? (value as AgentTransportMode)
+    : undefined
+}
+
+function normalizeNonNegativeMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function buildPiRemoteConnectionOptions(
+  settings: AppSettings,
+): Pick<PiAgentQueryOptions, 'transport' | 'httpIdleTimeoutMs' | 'websocketConnectTimeoutMs'> {
+  const transport = normalizeAgentTransportMode(settings.agentTransport)
+  const httpIdleTimeoutMs = normalizeNonNegativeMs(settings.agentHttpIdleTimeoutMs)
+  const websocketConnectTimeoutMs = normalizeNonNegativeMs(settings.agentWebsocketConnectTimeoutMs)
+  return {
+    ...(transport ? { transport } : {}),
+    ...(httpIdleTimeoutMs !== undefined ? { httpIdleTimeoutMs } : {}),
+    ...(websocketConnectTimeoutMs !== undefined ? { websocketConnectTimeoutMs } : {}),
+  }
 }
 
 const READ_ONLY_TOOL_NAME_PREFIXES = [
@@ -494,9 +529,32 @@ export class AgentOrchestrator {
   /** 运行中会话的当前权限模式（支持运行时动态切换） */
   private sessionPermissionModes = new Map<string, PromaPermissionMode>()
 
+  /** MCP 远程连接启动阶段的取消控制器；adapter query 尚未创建时 stop 依赖它打断 connect/listTools */
+  private mcpStartupAbortControllers = new Map<string, McpStartupAbortState>()
+
   constructor(adapter: AgentProviderAdapter, eventBus: AgentEventBus) {
     this.adapter = adapter
     this.eventBus = eventBus
+  }
+
+  private registerMcpStartupAbortController(sessionId: string, runToken: symbol): AbortSignal {
+    const controller = new AbortController()
+    this.mcpStartupAbortControllers.set(sessionId, { runToken, controller })
+    return controller.signal
+  }
+
+  private clearMcpStartupAbortController(sessionId: string, runToken: symbol): void {
+    const state = this.mcpStartupAbortControllers.get(sessionId)
+    if (state?.runToken === runToken) {
+      this.mcpStartupAbortControllers.delete(sessionId)
+    }
+  }
+
+  private abortMcpStartup(sessionId: string, runToken: symbol | undefined): void {
+    const state = this.mcpStartupAbortControllers.get(sessionId)
+    if (!state || (runToken && state.runToken !== runToken)) return
+    state.controller.abort()
+    this.mcpStartupAbortControllers.delete(sessionId)
   }
 
   /**
@@ -532,13 +590,20 @@ export class AgentOrchestrator {
           ...(entry.env && Object.keys(entry.env).length > 0 && { env: entry.env }),
           ...(entry.cwd && { cwd: entry.cwd }),
           required: false,
-          startup_timeout_sec: entry.timeout ?? 30,
+          startup_timeout_sec: entry.startup_timeout_sec ?? entry.timeout ?? 30,
+          ...(entry.tool_timeout_sec !== undefined && { tool_timeout_sec: entry.tool_timeout_sec }),
         }
-      } else if ((type === 'http' || type === 'sse') && entry.url) {
+      } else if ((type === 'http' || type === 'sse' || type === 'websocket') && entry.url) {
         mcpServers[name] = {
           type,
           url: entry.url,
           ...(entry.headers && Object.keys(entry.headers).length > 0 && { headers: entry.headers }),
+          ...(entry.startup_timeout_sec !== undefined && { startup_timeout_sec: entry.startup_timeout_sec }),
+          ...(entry.timeout !== undefined && { timeout: entry.timeout }),
+          ...(entry.tool_timeout_sec !== undefined && { tool_timeout_sec: entry.tool_timeout_sec }),
+          ...(entry.sessionId && { sessionId: entry.sessionId }),
+          ...(entry.reconnectionOptions && { reconnectionOptions: entry.reconnectionOptions }),
+          ...(entry.auth && { auth: entry.auth }),
           required: false,
         }
       } else {
@@ -865,11 +930,13 @@ export class AgentOrchestrator {
     // 否则用本地时间戳作为回退（headless 模式等无渲染进程场景）。
     const streamStartedAt = input.startedAt ?? Date.now()
     this.activeSessions.set(sessionId, runToken)
+    const mcpStartupSignal = this.registerMcpStartupAbortController(sessionId, runToken)
 
     const hasNewerRun = (): boolean => {
       const activeRun = this.activeSessions.get(sessionId)
       return activeRun !== undefined && activeRun !== runToken
     }
+    const isCurrentRunActive = (): boolean => this.activeSessions.get(sessionId) === runToken
     const releaseActiveRun = (): void => {
       // 在发送 STREAM_COMPLETE 前释放 active slot，避免渲染进程已进入空闲态、
       // 主进程仍在 finally 前短暂拒绝下一条消息。
@@ -877,6 +944,7 @@ export class AgentOrchestrator {
       this.activeSessions.delete(sessionId)
       this.sessionPermissionModes.delete(sessionId)
       this.queuedMessageUuids.delete(sessionId)
+      this.clearMcpStartupAbortController(sessionId, runToken)
     }
     const completeRun = (
       messages?: AgentMessage[],
@@ -893,6 +961,13 @@ export class AgentOrchestrator {
       releaseActiveRun()
       callbacks.onError(error)
       callbacks.onComplete(messages, opts)
+    }
+    const completePreQueryStoppedRun = (): void => {
+      const wasStoppedByUser = this.consumeStoppedByUser(runToken)
+      if (!hasNewerRun()) {
+        try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
+      }
+      completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
     }
 
     const modelRouting = resolveAgentModelRouting({ modelId: modelId || DEFAULT_MODEL_ID, provider: channel.provider })
@@ -1034,12 +1109,28 @@ export class AgentOrchestrator {
 
       if (Object.keys(mcpServers).length > 0) {
         const fetchFn = getFetchFn(proxyUrl)
-        const bridgeResult = await buildMcpBridgeTools(mcpServers, fetchFn, agentCwd, runtimeEnv.env)
+        let bridgeResult: McpBridgeBuildResult
+        try {
+          bridgeResult = await buildMcpBridgeTools(mcpServers, fetchFn, agentCwd, runtimeEnv.env, mcpStartupSignal)
+        } catch (error) {
+          if (mcpStartupSignal.aborted || !isCurrentRunActive()) {
+            console.log(`[Agent 编排] 会话 ${sessionId} 在 MCP 初始化阶段已被用户中止`)
+            completePreQueryStoppedRun()
+            return
+          }
+          throw error
+        }
         customTools.push(...bridgeResult.tools)
         for (const toolName of bridgeResult.readOnlyToolNames) {
           readOnlyExternalTools.add(toolName)
         }
         toolCleanups.push(bridgeResult.cleanup)
+      }
+      this.clearMcpStartupAbortController(sessionId, runToken)
+      if (!isCurrentRunActive()) {
+        console.log(`[Agent 编排] 会话 ${sessionId} 在进入 Pi query 前已被用户中止`)
+        completePreQueryStoppedRun()
+        return
       }
       addKnownPromaReadOnlyToolNames(readOnlyExternalTools, customTools)
 
@@ -1337,6 +1428,7 @@ export class AgentOrchestrator {
         // Pi 思考配置（从 settings 读取）
         ...(appSettings.agentThinking && { thinking: appSettings.agentThinking }),
         effort: appSettings.agentEffort ?? 'high',
+        ...buildPiRemoteConnectionOptions(appSettings),
         // 子代理（Agent 工具）委派模型：DeepSeek 主模型下降级到 deepseek-v4-flash，缺省继承主模型
         ...(modelRouting.subagentModel && { subagentModel: modelRouting.subagentModel }),
         // 手动压缩：走 pi 原生 session.compact()，而非把 /compact 当普通 prompt 发给模型
@@ -1418,7 +1510,6 @@ export class AgentOrchestrator {
         !!(existingSdkSessionId || capturedSdkSessionId || queryOptions.resumeSessionId)
 
       const queryStartedAt = Date.now()
-      const isCurrentRunActive = (): boolean => this.activeSessions.get(sessionId) === runToken
       const completeStoppedRun = (): void => {
         const wasStoppedByUser = this.consumeStoppedByUser(runToken)
         this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
@@ -2146,6 +2237,7 @@ export class AgentOrchestrator {
    */
   stop(sessionId: string): void {
     const runToken = this.activeSessions.get(sessionId)
+    this.abortMcpStartup(sessionId, runToken)
     this.activeSessions.delete(sessionId)
     this.sessionPermissionModes.delete(sessionId)
     if (runToken) this.stoppedRunTokens.add(runToken)

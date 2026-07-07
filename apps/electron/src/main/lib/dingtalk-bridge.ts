@@ -151,6 +151,8 @@ class DingTalkBridge {
         },
       },
       getDefaultWorkspaceId: () => this.botConfig.defaultWorkspaceId,
+      getDefaultChannelId: () => this.botConfig.defaultChannelId,
+      getDefaultModelId: () => this.botConfig.defaultModelId,
       bindingStore: createJsonBridgeChatBindingStore(
         getDingTalkBotBindingsPath(botConfig.id),
         `钉钉 Bridge/${botConfig.name}`,

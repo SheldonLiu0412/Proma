@@ -6,6 +6,9 @@
 
 import type { EnvironmentCheckResult, ThinkingConfig, AgentEffort, FeishuSessionMirrorSettings } from '@proma/shared'
 
+/** Pi SDK 远程模型请求传输策略 */
+export type AgentTransportMode = 'sse' | 'websocket' | 'websocket-cached' | 'auto'
+
 /** 通知音场景类型 */
 export type NotificationSoundType = 'taskComplete' | 'permissionRequest' | 'exitPlanMode'
 
@@ -226,6 +229,12 @@ export interface AppSettings {
   agentMaxBudgetUsd?: number
   /** Agent 最大轮次（0 或 undefined = SDK 默认） */
   agentMaxTurns?: number
+  /** Pi SDK 远程模型请求传输策略（undefined = Pi SDK 默认 auto） */
+  agentTransport?: AgentTransportMode
+  /** Pi SDK HTTP 空闲超时，单位毫秒（undefined = SDK 默认） */
+  agentHttpIdleTimeoutMs?: number
+  /** Pi SDK WebSocket 建连超时，单位毫秒（undefined = SDK 默认） */
+  agentWebsocketConnectTimeoutMs?: number
   /** 教程推荐横幅是否已关闭 */
   tutorialBannerDismissed?: boolean
   /** 自动归档天数（0 = 禁用，默认 7） */

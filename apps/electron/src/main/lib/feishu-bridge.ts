@@ -29,7 +29,7 @@ import type {
 } from '@proma/shared'
 import { FEISHU_IPC_CHANNELS, AGENT_IPC_CHANNELS } from '@proma/shared'
 import { getDecryptedBotAppSecret } from './feishu-config'
-import { agentEventBus, runAgentHeadless, stopAgent } from './agent-service'
+import { agentEventBus, runAgentHeadless, stopAgent, isAgentSessionActive } from './agent-service'
 import { createAgentSession, listAgentSessions, getAgentSessionMeta } from './agent-session-manager'
 import {
   listAgentWorkspacesByUpdatedAt,
@@ -114,7 +114,11 @@ interface FeishuFileAttachment {
 /** 会话累积缓冲 */
 interface SessionBuffer {
   text: string
+  assistantTextParts: string[]
+  assistantTextIndexByUuid: Map<string, number>
+  anonymousPartialIndex?: number
   toolSummaries: Map<string, ToolSummary>
+  seenToolUseKeys: Set<string>
   startedAt: number
 }
 
@@ -303,6 +307,8 @@ class FeishuBridge {
   }
 
   stop(): void {
+    this.stopActiveBoundSessions('Bridge 停止')
+
     // 取消 EventBus 监听
     this.eventBusUnsubscribe?.()
     this.eventBusUnsubscribe = null
@@ -360,19 +366,14 @@ class FeishuBridge {
     try {
       const raw = readFileSync(bindingsPath, 'utf-8')
       const bindings = JSON.parse(raw) as FeishuChatBinding[]
-      const appSettings = getSettings()
-
       for (const b of bindings) {
         // 验证对应会话仍然存在
         const session = getAgentSessionMeta(b.sessionId)
         if (session) {
-          // 同步最新的渠道和模型设置（用户可能已更改）
-          if (appSettings.agentChannelId) {
-            b.channelId = appSettings.agentChannelId
-          }
-          if (appSettings.agentModelId) {
-            b.modelId = appSettings.agentModelId
-          }
+          // 只补齐缺失字段，避免恢复绑定时用全局设置覆盖目标 session 的模型。
+          b.workspaceId = b.workspaceId || session.workspaceId || this.botConfig.defaultWorkspaceId || ''
+          b.channelId = b.channelId || session.channelId || this.botConfig.defaultChannelId || ''
+          b.modelId = b.modelId ?? session.modelId ?? this.botConfig.defaultModelId
           this.chatBindings.set(b.chatId, b)
           this.sessionToChat.set(b.sessionId, b.chatId)
         }
@@ -449,6 +450,8 @@ class FeishuBridge {
   updateBinding(input: FeishuUpdateBindingInput): FeishuChatBinding | null {
     const binding = this.chatBindings.get(input.chatId)
     if (!binding) return null
+    const targetSession = input.sessionId !== undefined ? getAgentSessionMeta(input.sessionId) : undefined
+    if (input.sessionId !== undefined && !targetSession) return null
 
     if (input.workspaceId !== undefined) {
       binding.workspaceId = input.workspaceId
@@ -458,6 +461,12 @@ class FeishuBridge {
       this.sessionToChat.delete(binding.sessionId)
       binding.sessionId = input.sessionId
       this.sessionToChat.set(input.sessionId, input.chatId)
+
+      // 设置页绑定已有 session 时，运行时渠道/模型应跟随目标 session，
+      // 避免继续使用旧 binding 遗留的 channel/model。
+      binding.workspaceId = input.workspaceId ?? targetSession?.workspaceId ?? binding.workspaceId
+      binding.channelId = targetSession?.channelId ?? this.botConfig.defaultChannelId ?? getSettings().agentChannelId ?? ''
+      binding.modelId = targetSession?.modelId ?? this.botConfig.defaultModelId ?? getSettings().agentModelId ?? undefined
     }
 
     this.saveBindings()
@@ -518,7 +527,7 @@ class FeishuBridge {
       sessionId: session.id,
       workspaceId,
       channelId,
-      modelId: this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
+      modelId: session.modelId ?? this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
       source: 'session-mirror',
       chatType: 'group',
       groupName,
@@ -1043,6 +1052,7 @@ class FeishuBridge {
 
     // 渠道/模型：Bot 配置 > 应用设置
     const channelId = this.botConfig.defaultChannelId ?? appSettings.agentChannelId
+    const modelId = this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined
     if (!channelId) {
       await this.sendMessage(chatId, '请先在 Proma Agent 设置中选择渠道。')
       return
@@ -1053,6 +1063,7 @@ class FeishuBridge {
       title,
       channelId,
       workspaceId,
+      modelId,
     )
 
     // 绑定
@@ -1063,7 +1074,7 @@ class FeishuBridge {
       sessionId: session.id,
       workspaceId,
       channelId,
-      modelId: this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
+      modelId,
       source: 'feishu',
       chatType: msgCtx.chatType,
       groupName: msgCtx.groupName,
@@ -1259,8 +1270,8 @@ class FeishuBridge {
       userId: msgCtx.senderOpenId,
       sessionId: match.id,
       workspaceId: match.workspaceId ?? this.botConfig.defaultWorkspaceId ?? appSettings.agentWorkspaceId ?? '',
-      channelId: match.channelId ?? appSettings.agentChannelId ?? '',
-      modelId: this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
+      channelId: match.channelId ?? this.botConfig.defaultChannelId ?? appSettings.agentChannelId ?? '',
+      modelId: match.modelId ?? this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
       source: 'feishu',
       chatType: msgCtx.chatType,
       groupName: msgCtx.groupName,
@@ -1353,10 +1364,10 @@ class FeishuBridge {
       const session = getAgentSessionMeta(binding.sessionId)
       lines.push(`**会话**: ${session?.title ?? '未知'} (\`${binding.sessionId.slice(0, 8)}\`)`)
 
-      // 模型信息（与发送路径同序解析：binding > Bot 配置 > 应用设置）
+      // 模型信息（与发送路径同序解析：binding/session > Bot 配置 > 应用设置）
       const nowSettings = getSettings()
-      const effChannelId = binding.channelId || this.botConfig.defaultChannelId || nowSettings.agentChannelId
-      const effModelId = binding.modelId || this.botConfig.defaultModelId || nowSettings.agentModelId
+      const effChannelId = binding.channelId || session?.channelId || this.botConfig.defaultChannelId || nowSettings.agentChannelId
+      const effModelId = binding.modelId ?? session?.modelId ?? this.botConfig.defaultModelId ?? nowSettings.agentModelId
       const modelInfo = describeBindingModel(effChannelId, effModelId)
       lines.push(`**模型**: ${modelInfo.channelName} / ${modelInfo.modelName}${modelInfo.valid ? '' : '（已失效）'}`)
     } else {
@@ -1596,7 +1607,10 @@ class FeishuBridge {
     // 初始化缓冲（保留供桌面通知/降级路径使用）
     this.sessionBuffers.set(binding.sessionId, {
       text: '',
+      assistantTextParts: [],
+      assistantTextIndexByUuid: new Map(),
       toolSummaries: new Map(),
+      seenToolUseKeys: new Set(),
       startedAt: Date.now(),
     })
 
@@ -1688,10 +1702,11 @@ class FeishuBridge {
       }
     }
 
-    // 渠道/模型解析：binding（per-chat 用户在 IM 里切过的）优先，其次 Bot 配置、应用设置
+    // 渠道/模型解析：binding/session 明确值优先，其次 Bot 配置、应用设置
     const latestSettings = getSettings()
-    const channelId = binding.channelId || this.botConfig.defaultChannelId || latestSettings.agentChannelId || ''
-    const modelId = binding.modelId || this.botConfig.defaultModelId || latestSettings.agentModelId
+    const sessionMeta = getAgentSessionMeta(binding.sessionId)
+    const channelId = binding.channelId || sessionMeta?.channelId || this.botConfig.defaultChannelId || latestSettings.agentChannelId || ''
+    const modelId = binding.modelId ?? sessionMeta?.modelId ?? this.botConfig.defaultModelId ?? latestSettings.agentModelId
 
     const input: AgentSendInput = {
       sessionId: binding.sessionId,
@@ -1771,18 +1786,7 @@ class FeishuBridge {
       const msg = payload.message
       // 从 assistant 消息中提取文本与工具使用摘要
       if (msg.type === 'assistant') {
-        const aMsg = msg as SDKAssistantMessage
-        for (const block of aMsg.message?.content ?? []) {
-          if (block.type === 'text') {
-            const text = (block as { text?: unknown }).text
-            if (typeof text === 'string') buffer.text += text
-          } else if (block.type === 'tool_use') {
-            const tb = block as { name?: unknown }
-            if (typeof tb.name === 'string') {
-              accumulateToolStart(buffer.toolSummaries, tb.name)
-            }
-          }
-        }
+        this.upsertAssistantBuffer(buffer, msg as SDKAssistantMessage)
       }
       // 从 user tool_result 中检测错误（暂未精细处理，预留扩展点）
       if (msg.type === 'user') {
@@ -1902,6 +1906,76 @@ class FeishuBridge {
     }
 
     this.sessionBuffers.delete(sessionId)
+  }
+
+  private upsertAssistantBuffer(buffer: SessionBuffer, message: SDKAssistantMessage): void {
+    this.upsertAssistantText(buffer, message)
+    this.accumulateAssistantToolStarts(buffer, message)
+  }
+
+  private upsertAssistantText(buffer: SessionBuffer, message: SDKAssistantMessage): void {
+    const text = message.message?.content
+      ?.map((block) => block.type === 'text' && typeof block.text === 'string' ? block.text : '')
+      .join('') ?? ''
+    if (!text) return
+
+    const meta = message as SDKAssistantMessage & { _partial?: boolean }
+    const isPartial = meta._partial === true
+    const uuid = typeof meta.uuid === 'string' && meta.uuid.length > 0 ? meta.uuid : undefined
+
+    if (uuid) {
+      const existingIndex = buffer.assistantTextIndexByUuid.get(uuid)
+      if (existingIndex === undefined) {
+        buffer.assistantTextIndexByUuid.set(uuid, buffer.assistantTextParts.length)
+        buffer.assistantTextParts.push(text)
+      } else {
+        buffer.assistantTextParts[existingIndex] = text
+      }
+      buffer.text = buffer.assistantTextParts.join('')
+      return
+    }
+
+    // 兼容缺少 uuid 的 partial：只能把最近一个匿名 partial 视为同一条快照。
+    if (isPartial) {
+      if (buffer.anonymousPartialIndex === undefined) {
+        buffer.anonymousPartialIndex = buffer.assistantTextParts.length
+        buffer.assistantTextParts.push(text)
+      } else {
+        buffer.assistantTextParts[buffer.anonymousPartialIndex] = text
+      }
+    } else if (buffer.anonymousPartialIndex !== undefined) {
+      buffer.assistantTextParts[buffer.anonymousPartialIndex] = text
+      buffer.anonymousPartialIndex = undefined
+    } else {
+      buffer.assistantTextParts.push(text)
+    }
+
+    buffer.text = buffer.assistantTextParts.join('')
+  }
+
+  private accumulateAssistantToolStarts(buffer: SessionBuffer, message: SDKAssistantMessage): void {
+    const messageMeta = message as SDKAssistantMessage & { _partial?: boolean }
+    const messageUuid = typeof messageMeta.uuid === 'string' && messageMeta.uuid.length > 0
+      ? messageMeta.uuid
+      : messageMeta._partial === true
+        ? 'anonymous-partial'
+        : 'anonymous-final'
+
+    message.message?.content?.forEach((block, index) => {
+      if (block.type !== 'tool_use') return
+
+      const toolBlock = block as { id?: unknown; name?: unknown }
+      if (typeof toolBlock.name !== 'string') return
+
+      const blockId = typeof toolBlock.id === 'string' && toolBlock.id.length > 0
+        ? toolBlock.id
+        : `${toolBlock.name}:${index}`
+      const key = `${messageUuid}:${blockId}`
+      if (buffer.seenToolUseKeys.has(key)) return
+
+      buffer.seenToolUseKeys.add(key)
+      accumulateToolStart(buffer.toolSummaries, toolBlock.name)
+    })
   }
 
   private async sendAgentReply(chatId: string, result: FormattedAgentResult): Promise<void> {
@@ -2521,6 +2595,24 @@ class FeishuBridge {
       await this.replyCard(replyToId, card)
     } else {
       await this.sendCard(chatId, card)
+    }
+  }
+
+  private stopActiveBoundSessions(reason: string): void {
+    const sessionIds = new Set<string>([
+      ...this.sessionBuffers.keys(),
+      ...this.streamingRunStates.keys(),
+      ...this.streamingCards.keys(),
+    ])
+    for (const binding of this.chatBindings.values()) {
+      sessionIds.add(binding.sessionId)
+    }
+
+    for (const sessionId of sessionIds) {
+      if (!isAgentSessionActive(sessionId)) continue
+      console.log(`[飞书 Bridge] ${reason}，停止仍在运行的 Agent: ${sessionId.slice(0, 8)}`)
+      stopAgent(sessionId)
+      this.markTerminalHandled(sessionId)
     }
   }
 

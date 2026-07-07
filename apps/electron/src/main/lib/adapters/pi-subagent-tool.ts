@@ -19,7 +19,7 @@ import type { AgentMessage, AgentToolResult, ThinkingLevel } from '@earendil-wor
 import type { AgentSession, AgentSessionEvent, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
 import type { SDKMessage } from '@proma/shared'
-import type { PiAgentQueryOptions } from './pi-agent-adapter'
+import type { PiAgentQueryOptions, PiRemoteConnectionSettings } from './pi-agent-adapter'
 import type { AgentRuntimeGuard } from '../agent-runtime-guards'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
@@ -95,6 +95,10 @@ export interface SubagentToolDeps {
   ) => Promise<string>
   /** 子会话思考等级（与父会话一致） */
   thinkingLevel: ThinkingLevel
+  /** 子会话继承父会话的 Pi 远程连接设置（代理、传输策略、超时） */
+  buildRemoteConnectionSettings: (
+    input: Pick<PiAgentQueryOptions, 'proxyUrl' | 'runtimeEnv' | 'transport' | 'httpIdleTimeoutMs' | 'websocketConnectTimeoutMs'>,
+  ) => PiRemoteConnectionSettings
   /**
    * 父会话的运行时护栏（maxTurns/maxBudgetUsd）。子代理消耗的轮次/成本必须计入同一个护栏实例，
    * 否则子代理会绕过用户配置的预算/轮次上限（子会话独立于父 session，不共享 pi 的计费）。
@@ -196,12 +200,11 @@ export function createSubagentToolDefinition(deps: SubagentToolDeps): ToolDefini
         ...deps.wrapCustomTools(parentInput.customTools, parentInput.canUseTool).filter(canInheritTool),
       ])
 
-      const proxyUrl = parentInput.proxyUrl?.trim()
       const childSystemPrompt = buildChildSystemPrompt(parentInput.systemPrompt, description)
       const settingsManager = sdk.SettingsManager.inMemory({
         compaction: { enabled: false },
         retry: { enabled: false },
-        ...(proxyUrl ? { httpProxy: proxyUrl } : {}),
+        ...deps.buildRemoteConnectionSettings(parentInput),
       })
       const resourceLoader = new sdk.DefaultResourceLoader({
         cwd,

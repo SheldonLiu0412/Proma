@@ -458,23 +458,32 @@ export function normalizeWorkspaceMcpConfig(config: Partial<WorkspaceMcpConfig>)
     }
 
     const entryRecord = { ...(rawEntry as unknown as Record<string, unknown>) }
-    const entry = entryRecord as unknown as WorkspaceMcpConfig['servers'][string] & { type?: unknown }
-    const normalizedType = normalizeMcpTransportType(entry.type)
+    const typeInput = entryRecord.type ?? entryRecord.transport
+    const normalizedType = normalizeMcpTransportType(typeInput)
     if (entryRecord.cwd !== undefined && typeof entryRecord.cwd !== 'string') {
       delete entryRecord.cwd
     }
 
+    if (typeof entryRecord.enabled !== 'boolean') {
+      entryRecord.enabled = entryRecord.disabled !== true
+      console.log(`[Agent 工作区] MCP 服务器 "${name}" 缺少 enabled 字段，已按 disabled=${String(entryRecord.disabled)} 迁移为 enabled=${String(entryRecord.enabled)}`)
+    }
+    delete entryRecord.disabled
+
     if (normalizedType) {
-      if (entry.type !== normalizedType) {
-        console.log(`[Agent 工作区] MCP 服务器 "${name}" 的 type "${String(entry.type)}" 已规范化为 "${normalizedType}"`)
+      if (entryRecord.type !== normalizedType) {
+        console.log(`[Agent 工作区] MCP 服务器 "${name}" 的传输类型 "${String(typeInput)}" 已规范化为 "${normalizedType}"`)
       }
-      entry.type = normalizedType
-    } else if (!entry.type) {
-      entry.type = inferMcpTransportType(entry)
-      console.log(`[Agent 工作区] MCP 服务器 "${name}" 缺少 type 字段，已自动推断为 "${entry.type}"`)
+      entryRecord.type = normalizedType
+      delete entryRecord.transport
+    } else {
+      const inferredType = inferMcpTransportType(entryRecord)
+      entryRecord.type = inferredType
+      delete entryRecord.transport
+      console.log(`[Agent 工作区] MCP 服务器 "${name}" 缺少有效 type/transport 字段，已自动推断为 "${inferredType}"`)
     }
 
-    servers[name] = entry as WorkspaceMcpConfig['servers'][string]
+    servers[name] = entryRecord as unknown as WorkspaceMcpConfig['servers'][string]
   }
 
   return { servers }

@@ -11,10 +11,11 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 import type { ImageContent, TextContent } from '@earendil-works/pi-ai/compat'
 import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import type { McpReconnectionOptions, McpTransportType } from '@proma/shared'
 import { mergeRuntimeEnv } from './agent-runtime-env'
 
 export interface PromaMcpServerConfig {
-  type: 'stdio' | 'http' | 'sse'
+  type: McpTransportType
   command?: string
   args?: string[]
   env?: Record<string, string>
@@ -22,8 +23,12 @@ export interface PromaMcpServerConfig {
   url?: string
   headers?: Record<string, string>
   required?: boolean
+  timeout?: number
   startup_timeout_sec?: number
   tool_timeout_sec?: number
+  sessionId?: string
+  reconnectionOptions?: McpReconnectionOptions
+  auth?: Record<string, unknown>
 }
 
 export interface McpBridgeBuildResult {
@@ -80,6 +85,17 @@ interface McpPromptInfo {
   name: string
   description?: string
   arguments?: unknown[]
+}
+
+interface McpConnectionTestResult {
+  toolCount: number
+}
+
+interface StreamableHttpReconnectionOptions {
+  maxReconnectionDelay: number
+  initialReconnectionDelay: number
+  reconnectionDelayGrowFactor: number
+  maxRetries: number
 }
 
 type DefineTool = typeof import('@earendil-works/pi-coding-agent')['defineTool']
@@ -282,7 +298,7 @@ function asJsonObjectSchema(schema: unknown): Record<string, unknown> {
 }
 
 function getStartupTimeoutMs(config: PromaMcpServerConfig): number {
-  return Math.max(1, config.startup_timeout_sec ?? 30) * 1000
+  return Math.max(1, config.startup_timeout_sec ?? config.timeout ?? 30) * 1000
 }
 
 const DEFAULT_TOOL_TIMEOUT_SEC = 60
@@ -301,17 +317,64 @@ function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function hasHeaders(headers: Record<string, string> | undefined): headers is Record<string, string> {
+  return Boolean(headers && Object.keys(headers).length > 0)
+}
+
+function mergeHeaderInit(existing: HeadersInit | undefined, headers: Record<string, string>): Headers {
+  const merged = new Headers(existing)
+  for (const [key, value] of Object.entries(headers)) {
+    merged.set(key, value)
+  }
+  return merged
+}
+
+function createHeaderFetch(headers: Record<string, string> | undefined, fetchFn?: typeof fetch): typeof fetch | undefined {
+  if (!fetchFn && !hasHeaders(headers)) return undefined
+  const baseFetch = fetchFn ?? fetch
+  const headerFetch = ((input, init) => {
+    if (!hasHeaders(headers)) return baseFetch(input, init)
+    return baseFetch(input, {
+      ...init,
+      headers: mergeHeaderInit(init?.headers, headers),
+    })
+  }) as typeof fetch
+  const preconnect = (baseFetch as typeof fetch & { preconnect?: unknown }).preconnect
+  return typeof preconnect === 'function'
+    ? Object.assign(headerFetch, { preconnect }) as typeof fetch
+    : headerFetch
+}
+
+function normalizeReconnectionOptions(options: McpReconnectionOptions | undefined): StreamableHttpReconnectionOptions | undefined {
+  if (!options) return undefined
+  const hasConfig = Object.values(options).some((value) => typeof value === 'number' && Number.isFinite(value))
+  if (!hasConfig) return undefined
+
+  return {
+    maxReconnectionDelay: options.maxReconnectionDelay ?? 30_000,
+    initialReconnectionDelay: options.initialReconnectionDelay ?? 1_000,
+    reconnectionDelayGrowFactor: options.reconnectionDelayGrowFactor ?? 1.5,
+    maxRetries: options.maxRetries ?? 2,
+  }
+}
+
 async function withStartupAbortTimeout<T>(
   server: ConnectedMcpServer,
   label: string,
   timeoutMs: number,
   task: (options: RequestOptions | undefined) => Promise<T>,
+  externalSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController()
   let timeout: ReturnType<typeof setTimeout> | undefined
+  let abortHandler: (() => void) | undefined
 
   try {
-    return await Promise.race([
+    if (externalSignal?.aborted) {
+      controller.abort()
+      throw createMcpAbortError()
+    }
+    const raceTasks: Array<Promise<T>> = [
       withAbortableMcpRequest(server, controller.signal, task, timeoutMs),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
@@ -319,9 +382,20 @@ async function withStartupAbortTimeout<T>(
           controller.abort()
         }, timeoutMs)
       }),
-    ])
+    ]
+    if (externalSignal) {
+      raceTasks.push(new Promise<never>((_, reject) => {
+        abortHandler = () => {
+          controller.abort()
+          reject(createMcpAbortError())
+        }
+        externalSignal.addEventListener('abort', abortHandler, { once: true })
+      }))
+    }
+    return await Promise.race(raceTasks)
   } finally {
     if (timeout) clearTimeout(timeout)
+    if (externalSignal && abortHandler) externalSignal.removeEventListener('abort', abortHandler)
   }
 }
 
@@ -717,17 +791,32 @@ function buildResourceTools(defineTool: DefineTool, connectedServers: ConnectedM
   ]
 }
 
-async function withTimeout<T>(label: string, timeoutMs: number, task: Promise<T>): Promise<T> {
+async function withTimeout<T>(
+  label: string,
+  timeoutMs: number,
+  task: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined
+  let abortHandler: (() => void) | undefined
   try {
-    return await Promise.race([
+    if (signal?.aborted) throw createMcpAbortError()
+    const raceTasks: Array<Promise<T>> = [
       task,
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => reject(new Error(`${label} 超时 (${Math.ceil(timeoutMs / 1000)}s)`)), timeoutMs)
       }),
-    ])
+    ]
+    if (signal) {
+      raceTasks.push(new Promise<never>((_, reject) => {
+        abortHandler = () => reject(createMcpAbortError())
+        signal.addEventListener('abort', abortHandler, { once: true })
+      }))
+    }
+    return await Promise.race(raceTasks)
   } finally {
     if (timeout) clearTimeout(timeout)
+    if (signal && abortHandler) signal.removeEventListener('abort', abortHandler)
   }
 }
 
@@ -757,22 +846,34 @@ async function createTransport(
   }
 
   if (!config.url) throw new Error(`MCP server ${serverName} 缺少 url`)
-  const requestInit = config.headers && Object.keys(config.headers).length > 0
+  const requestInit = hasHeaders(config.headers)
     ? { headers: config.headers }
     : undefined
+  const url = new URL(config.url)
 
   if (config.type === 'sse') {
     const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js')
-    return new SSEClientTransport(new URL(config.url), {
+    return new SSEClientTransport(url, {
       requestInit,
       fetch: fetchFn,
+      eventSourceInit: {
+        fetch: createHeaderFetch(config.headers, fetchFn),
+      },
     })
   }
 
+  if (config.type === 'websocket') {
+    const { WebSocketClientTransport } = await import('@modelcontextprotocol/sdk/client/websocket.js')
+    return new WebSocketClientTransport(url)
+  }
+
   const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js')
-  return new StreamableHTTPClientTransport(new URL(config.url), {
+  const reconnectionOptions = normalizeReconnectionOptions(config.reconnectionOptions)
+  return new StreamableHTTPClientTransport(url, {
     requestInit,
     fetch: fetchFn,
+    ...(config.sessionId && { sessionId: config.sessionId }),
+    ...(reconnectionOptions && { reconnectionOptions }),
   })
 }
 
@@ -782,6 +883,7 @@ async function connectServer(
   fetchFn?: typeof fetch,
   defaultCwd?: string,
   runtimeEnv?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<ConnectedMcpServer> {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
   const transport = await createTransport(serverName, config, fetchFn, defaultCwd, runtimeEnv)
@@ -789,7 +891,7 @@ async function connectServer(
   const timeoutMs = getStartupTimeoutMs(config)
   const toolTimeoutMs = getToolTimeoutMs(config)
   try {
-    await withTimeout(`连接 MCP server ${serverName}`, timeoutMs, client.connect(transport))
+    await withTimeout(`连接 MCP server ${serverName}`, timeoutMs, client.connect(transport), signal)
     return { name: serverName, client, transport, toolTimeoutMs }
   } catch (error) {
     await closeConnectedServer({ name: serverName, client, transport, toolTimeoutMs })
@@ -817,6 +919,7 @@ async function closeConnectedServer(server: ConnectedMcpServer): Promise<void> {
 async function listServerTools(
   server: ConnectedMcpServer,
   config: PromaMcpServerConfig,
+  signal?: AbortSignal,
 ): Promise<McpToolInfo[]> {
   const timeoutMs = getStartupTimeoutMs(config)
   const listResult = await withStartupAbortTimeout(
@@ -824,8 +927,26 @@ async function listServerTools(
     `列出 MCP server ${server.name} 工具`,
     timeoutMs,
     (options) => server.client.listTools(undefined, options),
+    signal,
   )
   return (listResult.tools ?? []) as McpToolInfo[]
+}
+
+export async function testMcpServerConnection(
+  serverName: string,
+  config: PromaMcpServerConfig,
+  fetchFn?: typeof fetch,
+  defaultCwd?: string,
+  runtimeEnv?: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<McpConnectionTestResult> {
+  const server = await connectServer(serverName, config, fetchFn, defaultCwd, runtimeEnv, signal)
+  try {
+    const tools = await listServerTools(server, config, signal)
+    return { toolCount: tools.length }
+  } finally {
+    await closeConnectedServer(server)
+  }
 }
 
 async function loadMcpServer(
@@ -834,11 +955,12 @@ async function loadMcpServer(
   fetchFn: typeof fetch | undefined,
   defaultCwd: string | undefined,
   runtimeEnv: Record<string, string> | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<McpServerLoadResult> {
   let server: ConnectedMcpServer | undefined
   try {
-    server = await connectServer(serverName, config, fetchFn, defaultCwd, runtimeEnv)
-    const serverTools = await listServerTools(server, config)
+    server = await connectServer(serverName, config, fetchFn, defaultCwd, runtimeEnv, signal)
+    const serverTools = await listServerTools(server, config, signal)
     return { ok: true, serverName, config, server, serverTools }
   } catch (error) {
     if (server) await closeConnectedServer(server)
@@ -851,6 +973,7 @@ async function loadMcpServersWithConcurrency(
   fetchFn: typeof fetch | undefined,
   defaultCwd: string | undefined,
   runtimeEnv: Record<string, string> | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<McpServerLoadResult[]> {
   const results: McpServerLoadResult[] = new Array(entries.length)
   let nextIndex = 0
@@ -863,7 +986,7 @@ async function loadMcpServersWithConcurrency(
       const entry = entries[index]
       if (!entry) return
       const [serverName, config] = entry
-      results[index] = await loadMcpServer(serverName, config, fetchFn, defaultCwd, runtimeEnv)
+      results[index] = await loadMcpServer(serverName, config, fetchFn, defaultCwd, runtimeEnv, signal)
     }
   }))
 
@@ -875,13 +998,19 @@ export async function buildMcpBridgeTools(
   fetchFn?: typeof fetch,
   defaultCwd?: string,
   runtimeEnv?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<McpBridgeBuildResult> {
   const { defineTool } = await import('@earendil-works/pi-coding-agent')
   const connectedServers: ConnectedMcpServer[] = []
   const tools: ToolDefinition[] = []
   const readOnlyToolNames = new Set<string>()
   const usedToolNames = new Set<string>()
-  const loadResults = await loadMcpServersWithConcurrency(Object.entries(servers), fetchFn, defaultCwd, runtimeEnv)
+  const loadResults = await loadMcpServersWithConcurrency(Object.entries(servers), fetchFn, defaultCwd, runtimeEnv, signal)
+
+  if (signal?.aborted) {
+    await Promise.all(loadResults.map((result) => result.ok ? closeConnectedServer(result.server) : Promise.resolve()))
+    throw createMcpAbortError()
+  }
 
   const requiredFailure = loadResults.find((result) => !result.ok && result.config.required)
   if (requiredFailure && !requiredFailure.ok) {
